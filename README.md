@@ -78,28 +78,32 @@ wec-telemetry-hybrid-architecture/
 
 ## 🏗️ Why This Architecture?
 
-### The Racing Problem
+### My Racing Problem
 
 ```
-Real-Time Needs          Historical Needs
-├─ <100ms latency        ├─ Lap-by-lap replay
-├─ Live fuel strategy    ├─ Tire degradation modeling
-├─ Tire decision-making  ├─ Fuel consumption analysis
-└─ Instant alerts        └─ Session comparison
+Real-Time Needs (On-Track)   Historical Needs (Cloud)
+├─ <100ms latency            ├─ Lap-by-lap replay
+├─ Live fuel strategy        ├─ Tire degradation modeling
+├─ Tire decision-making      ├─ Fuel consumption analysis
+├─ Offline-capable           └─ ML training (SageMaker)
+└─ Instant alerts
 ```
 
-### The Solution: Kappa Architecture
+### The Solution: Hybrid Kappa
 
-**Single unified event stream** with:
-- ✅ Real-time processing (sub-100ms)
+**Local Kappa + Cloud Data Lake** with:
+- ✅ Real-time processing on-track (sub-100ms)
+- ✅ Works offline (no internet required)
 - ✅ Complete event history (zero data loss)
 - ✅ Native replay capability
-- ✅ Operational simplicity
-- ✅ Horizontal scalability
+- ✅ Cloud-ready analytics (Athena/Glue)
+- ✅ AI/ML pipeline ready (SageMaker)
 
 **vs. Lambda Architecture**: 2 systems (stream + batch) = complexity
 
 **vs. Traditional Database**: No audit trail, hard to replay
+
+**vs. Cloud-only**: Works offline, no latency jitter during race
 
 ---
 
@@ -107,13 +111,23 @@ Real-Time Needs          Historical Needs
 
 | Component | Technology | Why |
 |-----------|-----------|-----|
-| **Event Broker** | NATS JetStream | Lightweight, replay-capable, cloud-ready |
-| **Real-Time** | JetStream consumers | Built-in, durable, scalable |
-| **Warm Storage** | PostgreSQL | SQL queries, indexed, ACID |
-| **Cold Storage** | MinIO (S3-compat) | Cost-effective, complete audit trail |
-| **Cache** | Redis | Live dashboard performance |
+| **Event Broker** | NATS JetStream | Lightweight, replay-capable, offline-first |
+| **Backend Services** | Golang | Fast, concurrent, sub-100ms latency guarantee |
+| **Real-Time Processor** | Golang + JetStream | Built-in, durable, scalable, predictable |
+| **Warm Storage** | PostgreSQL | SQL queries, indexed, ACID for metrics |
+| **Cold Storage** | AWS S3 (Parquet) | Cost-effective, complete audit trail |
+| **Cache** | Redis | Live dashboard performance (<5ms) |
+| **UI Dashboard** | React + Node.js | Rich UI for race engineers, real-time updates |
 | **Containerization** | Docker Compose | Local dev → cloud deployment |
+| **Cloud Analytics** | AWS Athena + Glue | SQL on Parquet, schema auto-discovery |
 | **Monitoring** | Prometheus + Grafana | Observability (roadmap) |
+
+**Why Golang for Backend?**
+- ✅ Compiled (fast, no interpreter overhead)
+- ✅ Concurrent (goroutines handle 1000s of concurrent tasks)
+- ✅ Predictable latency (no GC pauses = consistent <100ms)
+- ✅ Lightweight (single binary per service)
+- ✅ NATS native support (best-in-class Go client)
 
 ---
 
@@ -127,6 +141,8 @@ Generates realistic telemetry from a simulated race car:
 - Fuel level + consumption
 - GPS coordinates
 - Lap tracking
+
+**Built in**: Golang (for speed + concurrency)
 
 **Example event** (50ms intervals):
 ```json
@@ -156,6 +172,8 @@ HTTP API that:
 - Validates schema
 - Publishes to NATS JetStream
 - Meters all requests
+
+**Built in**: Golang (zero-copy, fast scheduling)
 
 ```bash
 # Start one car
@@ -191,11 +209,16 @@ Consumes events and computes:
 - Fuel consumption projection
 - Anomaly detection
 
+**Built in**: Golang (goroutines for efficient concurrent processing)
+
 **Outputs**: Computed event stream (`telemetry-computed`)
 
 ### 5. Raw Event Sink
 
 Archives every event to MinIO (S3-compatible):
+
+**Built in**: Golang
+
 ```
 s3://telemetry-archive/
 ├── session_id=SESSION_001/
@@ -208,6 +231,8 @@ s3://telemetry-archive/
 ### 6. Query API
 
 REST API for dashboards and analysis tools:
+
+**Built in**: Golang (WebSocket server for real-time UI)
 
 ```bash
 # Live telemetry
