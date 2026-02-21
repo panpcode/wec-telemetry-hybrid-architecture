@@ -1,3 +1,6 @@
 go 1.21
 
-use ./services/ecu-simulator
+use (
+	./services/ecu-simulator
+	./services/ingestion-service
+)
