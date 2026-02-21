@@ -15,7 +15,7 @@
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
             # Go
-            go_1_21
+            go
             
             # Docker & Docker Compose
             docker
@@ -30,7 +30,7 @@
             jq
             
             # Node.js for frontend
-            nodejs_20
+            nodejs
             yarn
             
             # Build tools
