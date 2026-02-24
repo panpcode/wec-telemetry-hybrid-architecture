@@ -20,7 +20,7 @@ The system handles high-frequency ECU data streams (10-50ms intervals) requiring
 
 ### Single Team, On-Track Use Case
 
-**Scenario**: One WEC team (Toyota) at the track with 1-3 cars, need engineering dashboards + cloud analytics
+**Scenario**: One WEC team at the track with 1-3 cars, need engineering dashboards + cloud analytics
 
 **On-Track Challenges**:
 - Race engineers need **<100ms latency** for live decisions (tire, fuel, pit strategy)
@@ -105,7 +105,7 @@ The system handles high-frequency ECU data streams (10-50ms intervals) requiring
 
 - Grafana dashboard (remote monitoring)
 - SageMaker pipelines (automated ML)
-- Multi-team federation (other Toyota teams)
+- Multi-team federation
 
 ---
 
@@ -1138,7 +1138,7 @@ This **Kappa + JetStream architecture** is optimized for:
 5. **Developer Experience**: Local Docker, easy debugging
 6. **Portfolio Value**: Shows distributed systems mastery
 
-The system is **cloud-ready** but **self-hostable**, making it perfect for Toyota Gazoo Racing to evaluate and potentially adopt.
+The system is **cloud-ready** but **self-hostable**, making it perfect for teams like Toyota Gazoo Racing to evaluate and potentially adopt.
 
 ---
 
