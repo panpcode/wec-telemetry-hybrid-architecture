@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WEC Pit Wall — Live Telemetry</title>
+  <style>
+    :root {
+      --bg:          #0d1117;
+      --surface:     #161b22;
+      --surface2:    #21262d;
+      --border:      #30363d;
+      --text:        #e6edf3;
+      --dim:         #8b949e;
+      --green:       #3fb950;
+      --orange:      #d29922;
+      --red:         #f85149;
+      --cyan:        #79c0ff;
+      --yellow:      #e3b341;
+      --tire-cold:   #4fc3f7;
+      --tire-ok:     #4caf50;
+      --tire-warm:   #ff9800;
+      --tire-hot:    #f44336;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Courier New', monospace;
+      min-height: 100vh;
+    }
+
+    /* ── Header ─────────────────────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .brand {
+      font-size: 15px;
+      font-weight: bold;
+      letter-spacing: 4px;
+      color: var(--cyan);
+    }
+    .session-id {
+      font-size: 11px;
+      color: var(--dim);
+      letter-spacing: 1px;
+    }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+    }
+    .conn-indicator {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--dim);
+    }
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--red);
+      flex-shrink: 0;
+    }
+    .dot.live { background: var(--green); }
+    #clock {
+      font-size: 14px;
+      color: var(--dim);
+      min-width: 64px;
+      text-align: right;
+    }
+
+    /* ── Grid ────────────────────────────────────────────────────────────── */
+    #grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+      gap: 14px;
+      padding: 16px;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    /* ── Car card ────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px;
+      transition: border-color 0.3s;
+    }
+    .card.pit { border-color: var(--orange); }
+
+    /* card header */
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 10px;
+    }
+    .car-id {
+      font-size: 17px;
+      font-weight: bold;
+      letter-spacing: 2px;
+      color: var(--cyan);
+    }
+    .header-right-col { text-align: right; }
+    .lap-tag {
+      font-size: 12px;
+      color: var(--dim);
+    }
+    .pit-badge {
+      display: none;
+      font-size: 10px;
+      font-weight: bold;
+      letter-spacing: 1px;
+      background: var(--orange);
+      color: #000;
+      padding: 1px 6px;
+      border-radius: 3px;
+      margin-top: 3px;
+    }
+    .card.pit .pit-badge { display: inline-block; }
+
+    /* speed — most prominent reading on the card */
+    .speed-block {
+      text-align: center;
+      margin: 6px 0 10px;
+    }
+    .speed-value {
+      font-size: 50px;
+      font-weight: bold;
+      line-height: 1;
+      color: var(--text);
+      transition: color 0.2s;
+    }
+    .card.pit .speed-value { color: var(--dim); }
+    .speed-unit {
+      font-size: 11px;
+      color: var(--dim);
+      letter-spacing: 2px;
+    }
+
+    /* RPM */
+    .rpm-row {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 7px;
+    }
+    .rpm-label { font-size: 11px; color: var(--dim); }
+    .rpm-value { font-size: 15px; color: var(--yellow); }
+
+    /* throttle / brake bars */
+    .bar-row {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-bottom: 5px;
+    }
+    .bar-lbl { font-size: 10px; color: var(--dim); width: 30px; flex-shrink: 0; }
+    .bar-track {
+      flex: 1;
+      height: 7px;
+      background: var(--surface2);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.1s ease;
+    }
+    .bar-fill.thr { background: var(--green); }
+    .bar-fill.brk { background: var(--red); }
+    .bar-val { font-size: 10px; color: var(--dim); width: 36px; text-align: right; }
+
+    /* section labels + divider */
+    .divider { border: none; border-top: 1px solid var(--border); margin: 9px 0; }
+    .section-lbl {
+      font-size: 10px;
+      color: var(--dim);
+      letter-spacing: 2px;
+      margin-bottom: 7px;
+    }
+
+    /* tyre grid — 2×2 */
+    .tyre-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 5px;
+    }
+    .tyre-cell {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .tyre-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+    .tyre-pos { font-size: 10px; color: var(--dim); }
+    .tyre-val { font-size: 13px; font-weight: bold; }
+
+    /* fuel bar */
+    .fuel-block { margin-top: 10px; }
+    .fuel-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: var(--dim);
+      margin-bottom: 4px;
+    }
+    .fuel-track {
+      height: 7px;
+      background: var(--surface2);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .fuel-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.4s ease, background 0.4s ease;
+    }
+
+    /* last updated */
+    .updated { font-size: 10px; color: var(--dim); text-align: right; margin-top: 7px; }
+
+    /* no data placeholder */
+    #no-data {
+      text-align: center;
+      color: var(--dim);
+      font-size: 13px;
+      padding: 80px 20px;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <span class="brand">WEC TELEMETRY</span>
+  <span id="session-id" class="session-id">—</span>
+  <div class="header-right">
+    <div class="conn-indicator">
+      <span id="conn-dot" class="dot"></span>
+      <span id="conn-lbl">Connecting…</span>
+    </div>
+    <div id="clock">—</div>
+  </div>
+</header>
+
+<div id="grid">
+  <div id="no-data">Waiting for telemetry data…</div>
+</div>
+
+<script>
+  // ── Clock ─────────────────────────────────────────────────────────────────
+  const p2 = n => String(n).padStart(2, '0');
+  function tickClock() {
+    const d = new Date();
+    document.getElementById('clock').textContent =
+      `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+  }
+  setInterval(tickClock, 1000);
+  tickClock();
+
+  // ── Colour helpers ────────────────────────────────────────────────────────
+  // Tyre temperature bands (°C): cold → optimal → warm → critical
+  function tyreColor(t) {
+    if (t < 80)  return 'var(--tire-cold)';
+    if (t < 95)  return 'var(--tire-ok)';
+    if (t < 110) return 'var(--tire-warm)';
+    return 'var(--tire-hot)';
+  }
+  // Fuel level colour: green above 50%, orange 25–50%, red below 25%
+  function fuelColor(pct) {
+    if (pct > 0.5)  return 'var(--green)';
+    if (pct > 0.25) return 'var(--orange)';
+    return 'var(--red)';
+  }
+
+  // ── DOM helpers ───────────────────────────────────────────────────────────
+  const $ = id => document.getElementById(id);
+  function setText(id, v)  { const el = $(id); if (el) el.textContent = v; }
+  function setWidth(id, w) { const el = $(id); if (el) el.style.width = w; }
+  function setColor(id, c) { const el = $(id); if (el) el.style.color = c; }
+  function setBg(id, c)    { const el = $(id); if (el) el.style.background = c; }
+
+  // ── Render / update a car card ────────────────────────────────────────────
+  function renderCar(car) {
+    const cid = car.car_id;
+    let card = $('card-' + cid);
+
+    if (!card) {
+      // First time we see this car — inject the full card skeleton.
+      $('no-data').style.display = 'none';
+      card = document.createElement('div');
+      card.id = 'card-' + cid;
+      card.className = 'card';
+      card.innerHTML = `
+        <div class="card-header">
+          <span class="car-id">${cid}</span>
+          <div class="header-right-col">
+            <div class="lap-tag" id="${cid}-lap">LAP — / S —</div>
+            <div class="pit-badge">PIT IN</div>
+          </div>
+        </div>
+        <div class="speed-block">
+          <div class="speed-value" id="${cid}-speed">—</div>
+          <div class="speed-unit">KM / H</div>
+        </div>
+        <div class="rpm-row">
+          <span class="rpm-label">RPM</span>
+          <span class="rpm-value" id="${cid}-rpm">—</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-lbl">THR</span>
+          <div class="bar-track"><div class="bar-fill thr" id="${cid}-thr-bar" style="width:0%"></div></div>
+          <span class="bar-val" id="${cid}-thr-val">—</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-lbl">BRK</span>
+          <div class="bar-track"><div class="bar-fill brk" id="${cid}-brk-bar" style="width:0%"></div></div>
+          <span class="bar-val" id="${cid}-brk-val">—</span>
+        </div>
+        <hr class="divider">
+        <div class="section-lbl">TYRES</div>
+        <div class="tyre-grid">
+          <div class="tyre-cell"><span class="tyre-dot" id="${cid}-d-fl"></span><span class="tyre-pos">FL</span><span class="tyre-val" id="${cid}-fl">—</span></div>
+          <div class="tyre-cell"><span class="tyre-dot" id="${cid}-d-fr"></span><span class="tyre-pos">FR</span><span class="tyre-val" id="${cid}-fr">—</span></div>
+          <div class="tyre-cell"><span class="tyre-dot" id="${cid}-d-rl"></span><span class="tyre-pos">RL</span><span class="tyre-val" id="${cid}-rl">—</span></div>
+          <div class="tyre-cell"><span class="tyre-dot" id="${cid}-d-rr"></span><span class="tyre-pos">RR</span><span class="tyre-val" id="${cid}-rr">—</span></div>
+        </div>
+        <div class="fuel-block">
+          <div class="fuel-header">
+            <span>FUEL</span>
+            <span id="${cid}-fuel-lbl">— L</span>
+          </div>
+          <div class="fuel-track"><div class="fuel-fill" id="${cid}-fuel-bar" style="width:0%"></div></div>
+        </div>
+        <div class="updated" id="${cid}-ts">—</div>
+      `;
+      $('grid').appendChild(card);
+    }
+
+    // ── Update all values ──────────────────────────────────────────────────
+    const fuelPct = car.fuel_capacity_liters > 0
+      ? car.fuel_level_liters / car.fuel_capacity_liters : 0;
+    const brkPct  = Math.min(car.brake_pressure_bar / 20, 1) * 100;
+
+    card.className = 'card' + (car.in_pit ? ' pit' : '');
+
+    setText(cid + '-lap',     `LAP ${car.lap}  /  S${car.sector + 1}`);
+    setText(cid + '-speed',   car.in_pit ? 'PIT' : car.speed_kmh.toFixed(0));
+    setText(cid + '-rpm',     Math.round(car.rpm).toLocaleString());
+    setWidth(cid + '-thr-bar', car.throttle_percent + '%');
+    setText(cid + '-thr-val',  car.throttle_percent.toFixed(0) + '%');
+    setWidth(cid + '-brk-bar', brkPct.toFixed(1) + '%');
+    setText(cid + '-brk-val',  car.brake_pressure_bar.toFixed(1) + ' bar');
+
+    // Tyre temperatures with live colour coding
+    [['fl', car.tire_fl_temp], ['fr', car.tire_fr_temp],
+     ['rl', car.tire_rl_temp], ['rr', car.tire_rr_temp]].forEach(([pos, t]) => {
+      const col = tyreColor(t);
+      setText(cid + '-' + pos,   t.toFixed(1) + '°');
+      setColor(cid + '-' + pos,  col);
+      setBg(cid + '-d-' + pos,   col);
+    });
+
+    // Fuel bar
+    setWidth(cid + '-fuel-bar', (fuelPct * 100).toFixed(1) + '%');
+    setBg(cid + '-fuel-bar',    fuelColor(fuelPct));
+    setText(cid + '-fuel-lbl',
+      car.fuel_level_liters.toFixed(1) + ' L  /  ' + car.fuel_capacity_liters.toFixed(0) + ' L');
+
+    // Timestamp
+    setText(cid + '-ts', new Date(car.updated_at).toLocaleTimeString());
+
+    // Update session label from any car (they all share the same session_id)
+    if (car.session_id) $('session-id').textContent = car.session_id;
+  }
+
+  // ── WebSocket ─────────────────────────────────────────────────────────────
+  let ws;
+
+  function connect() {
+    ws = new WebSocket('ws://' + location.host + '/ws');
+
+    ws.onopen = () => {
+      $('conn-dot').classList.add('live');
+      $('conn-lbl').textContent = 'Live';
+    };
+
+    ws.onmessage = evt => {
+      const msg = JSON.parse(evt.data);
+      if (Array.isArray(msg.cars)) msg.cars.forEach(renderCar);
+    };
+
+    ws.onclose = () => {
+      $('conn-dot').classList.remove('live');
+      $('conn-lbl').textContent = 'Reconnecting…';
+      setTimeout(connect, 2000);
+    };
+
+    ws.onerror = () => ws.close();
+  }
+
+  connect();
+</script>
+</body>
+</html>

@@ -7,105 +7,126 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-const (
-	// Simulation parameters
-	SIMULATION_RATE_HZ  = 20 // 20 events per second (50ms intervals)
-	SIMULATION_INTERVAL = 50 * time.Millisecond
-
-	// Default configuration
-	INGESTION_URL       = "http://localhost:8080"
-	NUM_CARS            = 2                // Number of cars to simulate
-	SIMULATION_DURATION = 10 * time.Minute // How long to run
-)
-
-// init ensures uuid package is imported
-func init() {
-	_ = uuid.New()
-}
+// init ensures the uuid package is linked (it provides only side-effects here).
+func init() { _ = uuid.New() }
 
 func main() {
-	log.Println("🏎️  WEC ECU Simulator Starting...")
+	// ── Config from environment ─────────────────────────────────────────────
+	ingestionURL := getenv("INGESTION_URL", "http://localhost:8080")
+	numCars := getenvInt("NUM_CARS", 2)
+	trackName := getenv("TRACK", "le_mans")
+	simHz := getenvInt("SIM_HZ", 20)
+	simDuration := getenvDuration("SIM_DURATION", 10*time.Minute)
+	pitEveryLaps := getenvInt("PIT_EVERY_LAPS", 8)
 
-	// Create simulators for configured number of cars
-	cars := make(map[string]*CarSimulator)
-	for i := 1; i <= NUM_CARS; i++ {
-		carID := fmt.Sprintf("CAR_%03d", i)
-		config := DefaultCarConfig(carID)
-		cars[carID] = NewCarSimulator(config)
-		log.Printf("✅ Created simulator for %s", carID)
+	interval := time.Duration(1000/simHz) * time.Millisecond
+	track := TrackByName(trackName)
+
+	log.Printf("WEC ECU Simulator")
+	log.Printf("  Track    : %s (%.3f km, max %.0f km/h)", track.Name, track.LengthKm, track.MaxSpeedKmh)
+	log.Printf("  Cars     : %d", numCars)
+	log.Printf("  Rate     : %d Hz (%v interval)", simHz, interval)
+	log.Printf("  Duration : %v", simDuration)
+	log.Printf("  Pit stop : every %d laps", pitEveryLaps)
+	log.Printf("  Endpoint : %s", ingestionURL)
+
+	// ── Create one simulator per car ────────────────────────────────────────
+	cars := make([]*CarSimulator, numCars)
+	for i := range cars {
+		carID := fmt.Sprintf("CAR_%03d", i+1)
+		cfg := DefaultCarConfig(carID, track, pitEveryLaps)
+		cars[i] = NewCarSimulator(cfg)
+		log.Printf("  Created simulator for %s", carID)
 	}
 
-	// Create HTTP client with timeout
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-	}
+	client := &http.Client{Timeout: 5 * time.Second}
 
-	// Main simulation loop
-	ticker := time.NewTicker(SIMULATION_INTERVAL)
+	// ── Simulation loop ─────────────────────────────────────────────────────
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	startTime := time.Now()
-	eventCount := 0
+	start := time.Now()
+	var eventsSent atomic.Int64
 
-	log.Printf("🚀 Starting simulation loop (%.1f Hz, duration: %v)",
-		float64(1000)/float64(SIMULATION_INTERVAL.Milliseconds()),
-		SIMULATION_DURATION)
+	log.Printf("Simulation running...")
 
 	for range ticker.C {
-		// Check if we should stop
-		if time.Since(startTime) > SIMULATION_DURATION {
-			log.Printf("✋ Simulation complete!")
-			log.Printf("📊 Total events sent: %d", eventCount)
+		if time.Since(start) >= simDuration {
+			log.Printf("Simulation complete. Events sent: %d", eventsSent.Load())
 			os.Exit(0)
 		}
 
-		// Generate event for each car
-		for _, simulator := range cars {
-			event := simulator.Step(SIMULATION_INTERVAL.Seconds())
-
-			// Send to ingestion service
-			go sendEvent(client, event, &eventCount)
+		// Each car gets its own goroutine per tick so they don't block each other.
+		for _, sim := range cars {
+			event := sim.Step(interval.Seconds())
+			go func(e TelemetryEvent) {
+				if sendEvent(client, ingestionURL, e) {
+					eventsSent.Add(1)
+				}
+			}(event)
 		}
 
-		// Print status every 100 events
-		if eventCount%100 == 0 && eventCount > 0 {
-			log.Printf("📡 Events sent: %d (elapsed: %v)",
-				eventCount,
-				time.Since(startTime).Round(time.Second))
+		// Log throughput every 200 events.
+		if n := eventsSent.Load(); n > 0 && n%200 == 0 {
+			elapsed := time.Since(start).Round(time.Second)
+			log.Printf("Sent %d events in %v (%.1f ev/s)", n, elapsed, float64(n)/time.Since(start).Seconds())
 		}
 	}
 }
 
-// sendEvent sends a telemetry event to the ingestion service
-func sendEvent(client *http.Client, event TelemetryEvent, counter *int) {
-	// Marshal event to JSON
+// sendEvent serialises the event and POSTs it to the ingestion service.
+// Returns true on success.
+func sendEvent(client *http.Client, baseURL string, event TelemetryEvent) bool {
 	data, err := json.Marshal(event)
 	if err != nil {
-		log.Printf("❌ Failed to marshal event: %v", err)
-		return
+		log.Printf("marshal error: %v", err)
+		return false
 	}
 
-	// Send HTTP POST
-	resp, err := client.Post(
-		INGESTION_URL+"/telemetry/ingest",
-		"application/json",
-		bytes.NewReader(data),
-	)
+	resp, err := client.Post(baseURL+"/telemetry/ingest", "application/json", bytes.NewReader(data))
 	if err != nil {
-		log.Printf("❌ Failed to send event to %s: %v", INGESTION_URL, err)
-		return
+		log.Printf("POST error: %v", err)
+		return false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
-		log.Printf("⚠️  Ingestion service returned status %d", resp.StatusCode)
-		return
+		log.Printf("unexpected status %d for %s", resp.StatusCode, event.CarID)
+		return false
 	}
+	return true
+}
 
-	*counter++
+// ── Env helpers ─────────────────────────────────────────────────────────────
+
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func getenvInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+func getenvDuration(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return fallback
 }

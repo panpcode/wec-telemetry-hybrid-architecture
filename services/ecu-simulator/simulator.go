@@ -8,167 +8,210 @@ import (
 	"github.com/google/uuid"
 )
 
-// CarSimulator simulates a racing car with realistic physics
+// CarSimulator maintains the physics state for a single car across its race.
 type CarSimulator struct {
-	config        CarConfig
-	sessionID     string
-	lap           int
-	lapDistance   float64 // km
+	config CarConfig
+
+	// Session identity
+	sessionID string
+
+	// Track progress
+	lap         int
+	lapDistance float64 // km driven in the current lap
+	lapStart    time.Time
+
+	// Dynamics
 	speed         float64 // km/h
 	rpm           float64
-	fuelLevel     float64 // liters
-	throttle      float64 // 0-1
-	brakePressure float64 // 0-20 bar
+	throttle      float64 // 0–1
+	brakePressure float64 // bar
 
-	// Tire state
-	tireTempFL float64
-	tireTempFR float64
-	tireTempRL float64
-	tireTempRR float64
+	// Temperatures (°C)
+	tireTempFL, tireTempFR float64
+	tireTempRL, tireTempRR float64
+	brakeTemp              float64
 
-	// Brake state
-	brakeTemp float64 // celsius
+	// Consumables
+	fuelLevel    float64 // liters remaining
+	fuelBurnRate float64 // L/h (most recent step)
 
-	// Statistics
-	lapStartTime time.Time
-	eventCount   int
+	// Pit stop state
+	inPit      bool
+	pitElapsed float64 // seconds accumulated in current pit stop
+	lastPitLap int     // lap on which the last pit stop ended
+
+	eventCount int
 }
 
-// NewCarSimulator creates a new car simulator
+// NewCarSimulator initialises a simulator ready for the first lap.
 func NewCarSimulator(config CarConfig) *CarSimulator {
 	return &CarSimulator{
-		config:       config,
-		sessionID:    "SESSION_" + time.Now().Format("20060102_150405"),
-		lap:          0,
-		fuelLevel:    config.FuelCapacity,
-		tireTempFL:   70,
-		tireTempFR:   70,
-		tireTempRL:   70,
-		tireTempRR:   70,
-		brakeTemp:    100,
-		lapStartTime: time.Now(),
+		config:    config,
+		sessionID: "SESSION_" + time.Now().Format("20060102_150405"),
+
+		fuelLevel:  config.FuelCapacity,
+		tireTempFL: 70, tireTempFR: 70,
+		tireTempRL: 70, tireTempRR: 70,
+		brakeTemp:  100,
+		lapStart:   time.Now(),
+
+		// Pre-offset so the first pit stop happens after PitEveryLaps laps.
+		lastPitLap: -config.PitEveryLaps,
 	}
 }
 
-// clamp restricts a float64 value to a min/max range
-func clamp(value, min, max float64) float64 {
-	if value < min {
-		return min
+// clamp restricts v to the [lo, hi] range.
+func clamp(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
 	}
-	if value > max {
-		return max
+	if v > hi {
+		return hi
 	}
-	return value
+	return v
 }
 
-// safeRound rounds and validates a float, returning 0 if NaN/Inf
-func safeRound(value float64, decimals int) float64 {
-	if math.IsNaN(value) || math.IsInf(value, 0) {
+// safeRound rounds to n decimal places; returns 0 for NaN/Inf to avoid
+// corrupted JSON in the telemetry stream.
+func safeRound(v float64, n int) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
 		return 0
 	}
-	multiplier := math.Pow(10, float64(decimals))
-	return math.Round(value*multiplier) / multiplier
+	f := math.Pow(10, float64(n))
+	return math.Round(v*f) / f
 }
 
-// Step simulates one timestep (dt in seconds)
-func (cs *CarSimulator) Step(dt float64) TelemetryEvent {
-	// Clamp dt to prevent physics explosion
-	dt = clamp(dt, 0, 0.1)
+// inBrakingZone returns true when lapProgress falls inside any of the
+// track's defined braking zones.
+func inBrakingZone(progress float64, zones []BrakingZone) bool {
+	for _, z := range zones {
+		if progress >= z.Start && progress <= z.End {
+			return true
+		}
+	}
+	return false
+}
 
-	// Calculate lap progress (0 to 1)
-	lapProgress := math.Mod(cs.lapDistance, cs.config.TrackLength) / cs.config.TrackLength
+// Step advances the simulation by dt seconds and returns the resulting event.
+func (cs *CarSimulator) Step(dt float64) TelemetryEvent {
+	// Guard against extreme dt that would blow up the physics.
+	dt = clamp(dt, 0, 0.1)
+	track := cs.config.Track
+
+	// ── PIT STOP ───────────────────────────────────────────────────────────────
+	// While in the pit: car is stationary, tires cool, tank refills.
+	// The pit stop ends after PitDurationSec of accumulated time.
+	if cs.inPit {
+		cs.pitElapsed += dt
+
+		// Refuel at ~3 L/s (realistic fast-fill rig rate).
+		cs.fuelLevel = clamp(cs.fuelLevel+3.0*dt, 0, cs.config.FuelCapacity)
+
+		// Tires cool toward 70 °C baseline while the car sits still.
+		cs.tireTempFL += (70 - cs.tireTempFL) * 0.15
+		cs.tireTempFR += (70 - cs.tireTempFR) * 0.15
+		cs.tireTempRL += (70 - cs.tireTempRL) * 0.15
+		cs.tireTempRR += (70 - cs.tireTempRR) * 0.15
+
+		cs.speed = 0
+		cs.rpm = 0
+		cs.throttle = 0
+		cs.brakePressure = 0
+		cs.fuelBurnRate = 0
+
+		if cs.pitElapsed >= cs.config.PitDurationSec {
+			// Pit complete — return to track.
+			cs.inPit = false
+			cs.pitElapsed = 0
+			cs.lastPitLap = cs.lap
+		}
+		return cs.buildEvent(0, false)
+	}
+
+	// ── THROTTLE & BRAKE ───────────────────────────────────────────────────────
+	// Compute lap progress (0–1) and decide throttle/brake based on whether
+	// the car is approaching a corner or on a straight.
+	lapProgress := math.Mod(cs.lapDistance, track.LengthKm) / track.LengthKm
 	if math.IsNaN(lapProgress) {
 		lapProgress = 0
 	}
 
-	// ===== ACCELERATION/BRAKING LOGIC =====
-	// Simulates a simple track: brake in corners, accelerate on straights
-	if lapProgress < 0.3 || (0.5 < lapProgress && lapProgress < 0.7) {
-		// Braking zones
+	if inBrakingZone(lapProgress, track.BrakingZones) {
+		// Driver lifting and braking for a corner.
 		cs.throttle = math.Max(0, cs.throttle-0.15)
 		cs.brakePressure = math.Min(20, cs.brakePressure+0.2)
 	} else {
-		// Acceleration zones
+		// Full throttle on the straight.
 		cs.throttle = math.Min(1.0, cs.throttle+0.1)
 		cs.brakePressure = math.Max(0, cs.brakePressure-0.25)
 	}
 
-	// ===== SPEED CALCULATION =====
-	// Throttle → RPM → Speed
-	targetRPM := 3000 + (cs.throttle * 6500) // 3000-9500 RPM range
+	// ── SPEED ──────────────────────────────────────────────────────────────────
+	// Throttle position → target RPM → speed, with brake deceleration and
+	// a sinusoidal corner-speed penalty layered on top.
+	targetRPM := 3000 + cs.throttle*6500
 	cs.rpm = clamp(cs.rpm+(targetRPM-cs.rpm)*0.1*dt*1000, 0, cs.config.MaxRPM*1.1)
-
-	// RPM → Speed (simplified: 8000 RPM = max speed)
-	cs.speed = (cs.rpm / cs.config.MaxRPM) * cs.config.MaxSpeed
-
-	// Braking decelerates (each bar of pressure reduces speed)
+	cs.speed = (cs.rpm / cs.config.MaxRPM) * track.MaxSpeedKmh
 	cs.speed *= (1 - clamp(cs.brakePressure*0.01, 0, 1))
-
-	// Corner slowdown (sinusoidal speed variation on track)
 	cornerPenalty := math.Abs(math.Sin(lapProgress*math.Pi*4)) * 0.3
 	cs.speed *= (1 - cornerPenalty)
-	cs.speed = clamp(cs.speed, 0, cs.config.MaxSpeed*1.2)
+	cs.speed = clamp(cs.speed, 0, track.MaxSpeedKmh*1.2)
 
-	// ===== DISTANCE & LAP TRACKING =====
-	distanceKm := (cs.speed / 3600) * dt // km traveled in dt
-	cs.lapDistance += distanceKm
+	// ── DISTANCE & LAP COUNTING ────────────────────────────────────────────────
+	distKm := (cs.speed / 3600) * dt
+	cs.lapDistance += distKm
 
-	// Lap complete?
-	if cs.lapDistance >= cs.config.TrackLength {
+	if cs.lapDistance >= track.LengthKm {
 		cs.lap++
 		cs.lapDistance = 0
-		cs.lapStartTime = time.Now()
-	}
+		cs.lapStart = time.Now()
 
-	// ===== TIRE TEMPERATURE =====
-	// Based on speed + brake pressure + lateral g's
-	thermalLoad := (cs.speed/cs.config.MaxSpeed)*100 + cs.brakePressure*3
-	thermalLoad = clamp(thermalLoad, 0, 200)
-
-	for i := 0; i < 4; i++ {
-		targetTemp := 70 + thermalLoad
-		// Reduce noise amplitude to prevent NaN propagation
-		noise := rand.NormFloat64() * 0.1
-
-		switch i {
-		case 0: // FL
-			cs.tireTempFL += (targetTemp - cs.tireTempFL) * 0.05
-			cs.tireTempFL += noise
-		case 1: // FR
-			cs.tireTempFR += (targetTemp - cs.tireTempFR) * 0.05
-			cs.tireTempFR += noise
-		case 2: // RL
-			cs.tireTempRL += (targetTemp - cs.tireTempRL) * 0.05
-			cs.tireTempRL += noise
-		case 3: // RR
-			cs.tireTempRR += (targetTemp - cs.tireTempRR) * 0.05
-			cs.tireTempRR += noise
+		// Check whether a pit stop is due at this lap crossing.
+		if cs.config.PitEveryLaps > 0 && cs.lap-cs.lastPitLap >= cs.config.PitEveryLaps {
+			cs.inPit = true
+			cs.pitElapsed = 0
 		}
 	}
-	// Clamp all tire temps to valid ranges
-	cs.tireTempFL = clamp(cs.tireTempFL, 30, 150)
-	cs.tireTempFR = clamp(cs.tireTempFR, 30, 150)
-	cs.tireTempRL = clamp(cs.tireTempRL, 30, 150)
-	cs.tireTempRR = clamp(cs.tireTempRR, 30, 150)
 
-	// ===== FUEL CONSUMPTION =====
-	// liters/hour based on throttle + RPM
-	fuelBurnRate := (cs.throttle * 150) + (cs.rpm / cs.config.MaxRPM * 50) // L/h
-	cs.fuelLevel -= (fuelBurnRate / 3600) * dt
+	// ── TIRE TEMPERATURES ──────────────────────────────────────────────────────
+	// Thermal load is a function of speed (aerodynamic + road friction) and
+	// brake pressure (heat transferred to rubber). Each tire drifts toward the
+	// target temperature with small Gaussian noise per step.
+	thermalLoad := (cs.speed/track.MaxSpeedKmh)*100 + cs.brakePressure*3
+	thermalLoad = clamp(thermalLoad, 0, 200)
+	target := 70 + thermalLoad
+	noise := func() float64 { return rand.NormFloat64() * 0.1 }
+
+	cs.tireTempFL = clamp(cs.tireTempFL+(target-cs.tireTempFL)*0.05+noise(), 30, 150)
+	cs.tireTempFR = clamp(cs.tireTempFR+(target-cs.tireTempFR)*0.05+noise(), 30, 150)
+	cs.tireTempRL = clamp(cs.tireTempRL+(target-cs.tireTempRL)*0.05+noise(), 30, 150)
+	cs.tireTempRR = clamp(cs.tireTempRR+(target-cs.tireTempRR)*0.05+noise(), 30, 150)
+
+	// ── FUEL ───────────────────────────────────────────────────────────────────
+	// Burn rate peaks under high throttle and high RPM; unit is L/h.
+	cs.fuelBurnRate = cs.throttle*150 + (cs.rpm/cs.config.MaxRPM)*50
+	cs.fuelLevel -= (cs.fuelBurnRate / 3600) * dt
 	cs.fuelLevel = clamp(cs.fuelLevel, 0, cs.config.FuelCapacity*1.01)
 
-	// ===== BRAKE TEMPERATURE =====
-	brakeHeat := cs.brakePressure * 100
-	cs.brakeTemp += brakeHeat * dt
-	cs.brakeTemp *= 0.98 // Cool down
+	// ── BRAKE TEMPERATURE ─────────────────────────────────────────────────────
+	cs.brakeTemp += cs.brakePressure * 100 * dt
+	cs.brakeTemp *= 0.98 // passive cooling
 	cs.brakeTemp = clamp(cs.brakeTemp, 80, 500)
 
-	// ===== GENERATE EVENT =====
-	cs.eventCount++
-	sector := int((lapProgress) * 3)
+	sector := int(lapProgress * float64(track.Sectors))
+	return cs.buildEvent(sector, true)
+}
 
-	gpsLat := 48.2645 + (math.Sin(float64(cs.lap)*0.1) * 0.01)
-	gpsLong := 11.6265 + (math.Cos(float64(cs.lap)*0.1) * 0.01)
+// buildEvent assembles a TelemetryEvent from the current simulator state.
+// GPS coordinates trace a rough ellipse around the circuit's geographic centre.
+func (cs *CarSimulator) buildEvent(sector int, onTrack bool) TelemetryEvent {
+	cs.eventCount++
+	track := cs.config.Track
+
+	angle := (cs.lapDistance / track.LengthKm) * 2 * math.Pi
+	radius := track.LengthKm / (2 * math.Pi) * 0.01 // approx degrees
+	gpsLat := track.GpsCenterLat + math.Sin(angle)*radius
+	gpsLon := track.GpsCenterLon + math.Cos(angle)*radius*1.5
 
 	return TelemetryEvent{
 		EventID:          uuid.New().String(),
@@ -186,11 +229,12 @@ func (cs *CarSimulator) Step(dt float64) TelemetryEvent {
 		TireRlTemp:       safeRound(cs.tireTempRL, 1),
 		TireRrTemp:       safeRound(cs.tireTempRR, 1),
 		FuelLevelLiters:  safeRound(cs.fuelLevel, 2),
-		FuelFlowLph:      safeRound(fuelBurnRate, 1),
+		FuelFlowLph:      safeRound(cs.fuelBurnRate, 1),
 		BrakeTemp:        safeRound(cs.brakeTemp, 1),
-		GpsLat:           gpsLat,
-		GpsLong:          gpsLong,
-		OnTrack:          true,
+		GpsLat:           safeRound(gpsLat, 6),
+		GpsLong:          safeRound(gpsLon, 6),
+		OnTrack:          onTrack,
+		InPit:            cs.inPit,
 		SchemaVersion:    "1.0",
 	}
 }

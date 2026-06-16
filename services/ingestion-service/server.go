@@ -68,7 +68,7 @@ func NewServer(addr string, natsURL string) *Server {
 	}
 }
 
-// Connect establishes NATS connection
+// Connect establishes the NATS connection and ensures the JetStream stream exists.
 func (s *Server) Connect() error {
 	nc, err := nats.Connect(s.natsURL)
 	if err != nil {
@@ -82,7 +82,37 @@ func (s *Server) Connect() error {
 	}
 	s.js = js
 
+	// Create the stream if it doesn't already exist.
+	// Both the ingestion service and the cloud uploader call this on startup
+	// so neither service depends on the other to initialise the stream first.
+	if err := s.ensureStream(); err != nil {
+		return fmt.Errorf("failed to ensure stream: %w", err)
+	}
+
 	log.Printf("✅ Connected to NATS at %s", s.natsURL)
+	return nil
+}
+
+// ensureStream creates the TELEMETRY JetStream stream when it doesn't exist yet.
+// The stream buffers every car's raw events (subject TELEMETRY.*) to disk,
+// which lets consumers replay or resume after restarts without data loss.
+func (s *Server) ensureStream() error {
+	_, err := s.js.StreamInfo("TELEMETRY")
+	if err == nil {
+		return nil // stream already present
+	}
+	_, err = s.js.AddStream(&nats.StreamConfig{
+		Name:      "TELEMETRY",
+		Subjects:  []string{"TELEMETRY.*"},
+		Storage:   nats.FileStorage,
+		Retention: nats.LimitsPolicy,
+		MaxAge:    7 * 24 * time.Hour,      // retain 7 days
+		MaxBytes:  10 * 1024 * 1024 * 1024, // 10 GB hard cap
+	})
+	if err != nil {
+		return fmt.Errorf("AddStream: %w", err)
+	}
+	log.Println("✅ Created TELEMETRY JetStream stream")
 	return nil
 }
 
