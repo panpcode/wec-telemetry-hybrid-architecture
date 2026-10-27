@@ -34,6 +34,7 @@ type TelemetryEvent struct {
 	GpsLat           float64   `json:"gps_lat"`
 	GpsLong          float64   `json:"gps_long"`
 	OnTrack          bool      `json:"on_track"`
+	InPit            bool      `json:"in_pit"`
 	SchemaVersion    string    `json:"schema_version"`
 }
 
