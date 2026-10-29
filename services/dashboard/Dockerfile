@@ -4,9 +4,9 @@
 FROM golang:1.22-alpine AS builder
 WORKDIR /app
 
-COPY go.mod ./
+COPY go.mod go.sum ./
 COPY *.go *.html ./
-RUN go mod tidy && go build -o dashboard .
+RUN go mod download && go build -o dashboard .
 
 # ── Runtime stage ────────────────────────────────────────────────────────────
 FROM alpine:3.19

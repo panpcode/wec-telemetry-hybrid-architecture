@@ -1,0 +1,18 @@
+# Go build outputs
+services/ecu-simulator/ecu-simulator
+services/ecu-simulator/simulator
+services/ingestion-service/ingestion-service
+services/cloud-uploader/cloud-uploader
+services/dashboard/dashboard
+services/stream-processor/stream-processor
+*.test
+*.out
+
+# direnv / nix
+.direnv/
+result
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
