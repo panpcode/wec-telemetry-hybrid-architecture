@@ -9,8 +9,9 @@ import (
 )
 
 func main() {
-	httpAddr := flag.String("http", ":8080", "HTTP server address")
-	natsURL := flag.String("nats", "nats://localhost:4222", "NATS server URL")
+	// Flags override env vars; env vars (set by docker-compose) override the defaults.
+	httpAddr := flag.String("http", getenv("HTTP_ADDR", ":8080"), "HTTP server address (env HTTP_ADDR)")
+	natsURL := flag.String("nats", getenv("NATS_URL", "nats://localhost:4222"), "NATS server URL (env NATS_URL)")
 	flag.Parse()
 
 	log.Println("🏎️  WEC Ingestion Service Starting...")
@@ -39,4 +40,11 @@ func main() {
 	if err := server.Start(); err != nil {
 		log.Fatalf("❌ HTTP server error: %v", err)
 	}
+}
+
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
