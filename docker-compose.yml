@@ -55,6 +55,24 @@ services:
       "
     restart: "no"
 
+  # ── PostgreSQL (computed lap metrics + alerts) ───────────────────────────────
+  # Schema is applied by the stream processor on startup.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: telemetry
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "telemetry"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   # ── Ingestion Service ────────────────────────────────────────────────────────
   # HTTP entry point: validates incoming ECU events and publishes to NATS JetStream.
   ingestion-service:
@@ -112,6 +130,23 @@ services:
         condition: service_completed_successfully
     restart: on-failure
 
+  # ── Stream Processor ─────────────────────────────────────────────────────────
+  # Aggregates raw events into per-lap metrics and threshold alerts in Postgres.
+  stream-processor:
+    build: ./services/stream-processor
+    environment:
+      NATS_URL:         "nats://nats:4222"
+      DATABASE_URL:     "postgres://postgres:postgres@postgres:5432/telemetry?sslmode=disable"
+      TIRE_TEMP_MAX_C:  "120"
+      BRAKE_TEMP_MAX_C: "450"
+      FUEL_LOW_L:       "8"
+    depends_on:
+      nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
   # ── Pit Wall Dashboard ───────────────────────────────────────────────────────
   # Real-time telemetry display for race engineers.
   # Open http://localhost:3000 in a browser.
@@ -130,3 +165,4 @@ services:
 volumes:
   nats-data:
   minio-data:
+  postgres-data:

@@ -6,7 +6,7 @@ A hybrid on-track + cloud telemetry system designed for endurance racing (WEC). 
 
 ## The Problem
 
-A WEC team at Le Mans or Spa needs two things simultaneously:
+A WEC team needs two things simultaneously:
 
 - **On track**: race engineers making fuel and tire decisions in real time, with no dependency on internet connectivity
 - **At HQ**: the analytics team querying lap-by-lap data after the race for ML models and strategy preparation
@@ -117,15 +117,25 @@ Every ECU reading is a self-contained event published at 20 Hz per car:
 | ECU Simulator | Done | Physics-based car model. Simulates up to N cars at 20 Hz — speed, RPM, tire temps, fuel burn, GPS, lap tracking. |
 | Ingestion Service | Done | HTTP endpoint that validates incoming events and publishes to NATS JetStream. |
 | NATS JetStream | Done | Configured stream `TELEMETRY.*` with disk-backed storage and durable consumers. |
-| Cloud Uploader | In progress | Reads from JetStream, batches to Parquet, uploads to S3 with retry logic. |
-| Stream Processor | Planned | Lap aggregations, anomaly detection, PostgreSQL writes. |
-| Query API | Planned | REST + WebSocket endpoint for the pit-wall dashboard. |
+| Cloud Uploader | Done | Durable JetStream consumer; batches events as gzipped NDJSON and uploads to MinIO/S3 with Hive-style partitions (`session_id=/car_id=`). Parquet is a planned upgrade. |
+| Pit-Wall Dashboard | Done | Go WebSocket server + embedded HTML UI on :3000, live per-car speed, tires, fuel, pit status. |
+| Docker Compose | Done | Full stack: NATS, MinIO + bucket init, ingestion, simulator, uploader, dashboard. |
+| Stream Processor | Done | Durable JetStream consumer; per-lap metrics (lap time, fuel, speed, tire/brake temps, pit flag) and threshold alerts written idempotently to PostgreSQL. |
+| Query API | Planned | REST endpoint for historical lap and stint queries. |
 
 ---
 
 ## Running It Locally
 
-The ECU simulator and ingestion service can be run today without Docker.
+**Whole stack with Docker Compose:**
+```bash
+docker-compose up --build
+# Dashboard:      http://localhost:3000
+# MinIO console:  http://localhost:9001 (minioadmin / minioadmin)
+# Ingestion:      http://localhost:8080/health
+```
+
+Or run individual services without Docker:
 
 **Start NATS:**
 ```bash
@@ -167,7 +177,11 @@ wec-telemetry-hybrid-architecture/
 │   └── ECU_DATA_GENERATION.md   — ECU simulation approach
 ├── services/
 │   ├── ecu-simulator/           — car physics simulator (Go)
-│   └── ingestion-service/       — HTTP ingest + NATS publish (Go)
+│   ├── ingestion-service/       — HTTP ingest + NATS publish (Go)
+│   ├── cloud-uploader/          — JetStream → MinIO/S3 archiver (Go)
+│   ├── dashboard/               — live pit-wall UI over WebSocket (Go)
+│   └── stream-processor/        — lap metrics + alerts → PostgreSQL (Go)
+├── docker-compose.yml
 ├── Makefile
 └── README.md
 ```
@@ -188,6 +202,9 @@ Designed for a single WEC team with 1–3 cars. Requirements that shaped the des
 
 ## Roadmap
 
-The cloud uploader (S3 + Parquet pipeline) is the active work. After that: stream processor for lap metrics, then the pit-wall dashboard.
+Next up:
+
+1. **Query API**: REST access to lap and stint history from PostgreSQL.
+2. **Parquet output** from the cloud uploader, plus Athena/Glue and Terraform for production S3.
 
 Full design rationale: [architecture/Architecture.md](architecture/Architecture.md)
