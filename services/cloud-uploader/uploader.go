@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -16,7 +17,7 @@ import (
 )
 
 // Uploader pulls telemetry events from NATS JetStream and uploads them to
-// an S3-compatible object store (MinIO locally, real S3 in production).
+// an S3-compatible object store (SeaweedFS locally, real S3 in production).
 type Uploader struct {
 	cfg Config
 	nc  *nats.Conn
@@ -25,7 +26,7 @@ type Uploader struct {
 	s3  *minio.Client
 }
 
-// NewUploader connects to NATS and MinIO, then binds a durable consumer
+// NewUploader connects to NATS and the object store, then binds a durable consumer
 // to the TELEMETRY stream so uploads resume where they left off after restarts.
 func NewUploader(cfg Config) (*Uploader, error) {
 	// Connect to NATS with automatic reconnect so transient network blips
@@ -62,7 +63,7 @@ func NewUploader(cfg Config) (*Uploader, error) {
 		return nil, fmt.Errorf("PullSubscribe: %w", err)
 	}
 
-	// MinIO client — endpoint must be host:port without a scheme prefix.
+	// S3 client (minio-go speaks plain S3) — endpoint must be host:port without a scheme prefix.
 	endpoint := stripScheme(cfg.S3Endpoint)
 	s3, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(cfg.S3AccessKey, cfg.S3SecretKey, ""),
@@ -70,11 +71,40 @@ func NewUploader(cfg Config) (*Uploader, error) {
 	})
 	if err != nil {
 		nc.Close()
-		return nil, fmt.Errorf("MinIO client: %w", err)
+		return nil, fmt.Errorf("S3 client: %w", err)
 	}
 
-	log.Printf("Connected to NATS and MinIO (%s)", endpoint)
+	if err := ensureBucket(s3, cfg.S3Bucket); err != nil {
+		nc.Close()
+		return nil, fmt.Errorf("ensure bucket: %w", err)
+	}
+
+	log.Printf("Connected to NATS and S3 (%s), bucket %q ready", endpoint, cfg.S3Bucket)
 	return &Uploader{cfg: cfg, nc: nc, js: js, sub: sub, s3: s3}, nil
+}
+
+// ensureBucket creates the bucket if it doesn't exist, retrying while the
+// object store is still starting. Works against SeaweedFS, MinIO, or AWS S3.
+func ensureBucket(s3 *minio.Client, bucket string) error {
+	var err error
+	for attempt := 1; attempt <= 30; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		var exists bool
+		exists, err = s3.BucketExists(ctx, bucket)
+		if err == nil && !exists {
+			err = s3.MakeBucket(ctx, bucket, minio.MakeBucketOptions{})
+			if err == nil {
+				log.Printf("Created bucket %q", bucket)
+			}
+		}
+		cancel()
+		if err == nil {
+			return nil
+		}
+		log.Printf("Object store not ready (attempt %d): %v", attempt, err)
+		time.Sleep(2 * time.Second)
+	}
+	return err
 }
 
 // Run loops indefinitely: fetch → upload → ack.
@@ -85,16 +115,7 @@ func (u *Uploader) Run() {
 		u.cfg.BatchSize, batchTimeout)
 
 	for {
-		msgs, err := u.sub.Fetch(u.cfg.BatchSize, nats.MaxWait(batchTimeout))
-		if err == nats.ErrTimeout {
-			// Normal: no messages arrived within the window.
-			continue
-		}
-		if err != nil {
-			log.Printf("Fetch error: %v — sleeping 5s", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
+		msgs := u.collectBatch(batchTimeout)
 		if len(msgs) == 0 {
 			continue
 		}
@@ -113,13 +134,39 @@ func (u *Uploader) Run() {
 	}
 }
 
+// collectBatch keeps fetching until BatchSize messages are buffered or the
+// batch window closes. A single Fetch returns as soon as *any* messages are
+// available, which on a live stream means tiny batches and thousands of tiny
+// S3 objects, so we accumulate across several Fetch calls.
+func (u *Uploader) collectBatch(window time.Duration) []*nats.Msg {
+	deadline := time.Now().Add(window)
+	var batch []*nats.Msg
+	for len(batch) < u.cfg.BatchSize {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		msgs, err := u.sub.Fetch(u.cfg.BatchSize-len(batch), nats.MaxWait(remaining))
+		batch = append(batch, msgs...)
+		if errors.Is(err, nats.ErrTimeout) || errors.Is(err, context.DeadlineExceeded) {
+			break // window closed
+		}
+		if err != nil {
+			log.Printf("Fetch error: %v — sleeping 5s", err)
+			time.Sleep(5 * time.Second)
+			break
+		}
+	}
+	return batch
+}
+
 // uploadBatch groups messages by (session_id, car_id), compresses each group
-// as gzipped NDJSON, and uploads to MinIO using Hive-style path partitioning
+// as gzipped NDJSON, and uploads to S3 using Hive-style path partitioning
 // so Athena can use partition projection directly.
 //
-// Path format: session_id={X}/car_id={Y}/{timestamp}.jsonl.gz
-// To switch to real AWS S3, swap the minio client for the AWS SDK — the
-// upload logic (PutObject call) stays the same.
+// Path format: session_id={X}/car_id={Y}/{timestamp}_{firstSeq}.jsonl.gz
+// For real AWS S3, point S3_ENDPOINT at https://s3.<region>.amazonaws.com
+// with S3_USE_SSL=true — minio-go is a generic S3 client, no code change needed.
 func (u *Uploader) uploadBatch(msgs []*nats.Msg) error {
 	// Group raw payloads by session + car.
 	type group struct {
@@ -144,7 +191,14 @@ func (u *Uploader) uploadBatch(msgs []*nats.Msg) error {
 		groups[key].payloads = append(groups[key].payloads, json.RawMessage(m.Data))
 	}
 
-	ts := time.Now().UTC().Format("20060102T150405Z")
+	// The key must be unique per upload: batches close several times a second
+	// under load, so a second-resolution timestamp alone would overwrite earlier
+	// objects. The first JetStream sequence in the batch makes it unique.
+	ts := time.Now().UTC().Format("20060102T150405.000Z")
+	var firstSeq uint64
+	if md, err := msgs[0].Metadata(); err == nil {
+		firstSeq = md.Sequence.Stream
+	}
 
 	for _, g := range groups {
 		buf, err := compressNDJSON(g.payloads)
@@ -152,8 +206,8 @@ func (u *Uploader) uploadBatch(msgs []*nats.Msg) error {
 			return fmt.Errorf("compress %s/%s: %w", g.sessionID, g.carID, err)
 		}
 
-		objectKey := fmt.Sprintf("session_id=%s/car_id=%s/%s.jsonl.gz",
-			g.sessionID, g.carID, ts)
+		objectKey := fmt.Sprintf("session_id=%s/car_id=%s/%s_%d.jsonl.gz",
+			g.sessionID, g.carID, ts, firstSeq)
 
 		_, err = u.s3.PutObject(
 			context.Background(),
@@ -204,14 +258,14 @@ func ensureStream(js nats.JetStreamContext) error {
 		Subjects:  []string{"TELEMETRY.*"},
 		Storage:   nats.FileStorage,
 		Retention: nats.LimitsPolicy,
-		MaxAge:    7 * 24 * time.Hour,       // 7-day rolling window
-		MaxBytes:  10 * 1024 * 1024 * 1024,  // 10 GB hard cap
+		MaxAge:    7 * 24 * time.Hour,      // 7-day rolling window
+		MaxBytes:  10 * 1024 * 1024 * 1024, // 10 GB hard cap
 	})
 	return err
 }
 
 // stripScheme removes http:// or https:// from a URL, returning host:port only
-// (the format expected by the MinIO Go client).
+// (the format expected by the minio-go S3 client).
 func stripScheme(url string) string {
 	for _, prefix := range []string{"https://", "http://"} {
 		if strings.HasPrefix(url, prefix) {
