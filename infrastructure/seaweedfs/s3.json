@@ -1,0 +1,11 @@
+{
+  "identities": [
+    {
+      "name": "wec-dev",
+      "credentials": [
+        { "accessKey": "wec-dev", "secretKey": "wec-dev-secret" }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

@@ -117,9 +117,9 @@ Every ECU reading is a self-contained event published at 20 Hz per car:
 | ECU Simulator | Done | Physics-based car model. Simulates up to N cars at 20 Hz — speed, RPM, tire temps, fuel burn, GPS, lap tracking. |
 | Ingestion Service | Done | HTTP endpoint that validates incoming events and publishes to NATS JetStream. |
 | NATS JetStream | Done | Configured stream `TELEMETRY.*` with disk-backed storage and durable consumers. |
-| Cloud Uploader | Done | Durable JetStream consumer; batches events as gzipped NDJSON and uploads to MinIO/S3 with Hive-style partitions (`session_id=/car_id=`). Parquet is a planned upgrade. |
+| Cloud Uploader | Done | Durable JetStream consumer; batches events as gzipped NDJSON and uploads to S3 (SeaweedFS locally) with Hive-style partitions (`session_id=/car_id=`). Parquet is a planned upgrade. |
 | Pit-Wall Dashboard | Done | Go WebSocket server + embedded HTML UI on :3000, live per-car speed, tires, fuel, pit status. |
-| Docker Compose | Done | Full stack: NATS, MinIO + bucket init, ingestion, simulator, uploader, dashboard. |
+| Docker Compose | Done | Full stack: NATS, SeaweedFS (S3), PostgreSQL, ingestion, simulator, uploader, stream processor, dashboard. |
 | Stream Processor | Done | Durable JetStream consumer; per-lap metrics (lap time, fuel, speed, tire/brake temps, pit flag) and threshold alerts written idempotently to PostgreSQL. |
 | Query API | Planned | REST endpoint for historical lap and stint queries. |
 
@@ -131,7 +131,8 @@ Every ECU reading is a self-contained event published at 20 Hz per car:
 ```bash
 docker-compose up --build
 # Dashboard:      http://localhost:3000
-# MinIO console:  http://localhost:9001 (minioadmin / minioadmin)
+# S3 browser:     http://localhost:8888/buckets/wec-telemetry/  (SeaweedFS filer)
+# Laps / alerts:  make laps, make alerts
 # Ingestion:      http://localhost:8080/health
 ```
 
@@ -178,7 +179,7 @@ wec-telemetry-hybrid-architecture/
 ├── services/
 │   ├── ecu-simulator/           — car physics simulator (Go)
 │   ├── ingestion-service/       — HTTP ingest + NATS publish (Go)
-│   ├── cloud-uploader/          — JetStream → MinIO/S3 archiver (Go)
+│   ├── cloud-uploader/          — JetStream → S3 archiver (Go)
 │   ├── dashboard/               — live pit-wall UI over WebSocket (Go)
 │   └── stream-processor/        — lap metrics + alerts → PostgreSQL (Go)
 ├── docker-compose.yml

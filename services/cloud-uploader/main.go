@@ -9,10 +9,10 @@ import (
 func main() {
 	cfg := Config{
 		NatsURL:         getenv("NATS_URL", "nats://localhost:4222"),
-		S3Endpoint:      getenv("S3_ENDPOINT", "http://localhost:9000"),
+		S3Endpoint:      getenv("S3_ENDPOINT", "http://localhost:8333"),
 		S3Bucket:        getenv("S3_BUCKET", "wec-telemetry"),
-		S3AccessKey:     getenv("S3_ACCESS_KEY", "minioadmin"),
-		S3SecretKey:     getenv("S3_SECRET_KEY", "minioadmin"),
+		S3AccessKey:     getenv("S3_ACCESS_KEY", "wec-dev"),
+		S3SecretKey:     getenv("S3_SECRET_KEY", "wec-dev-secret"),
 		S3UseSSL:        getenvBool("S3_USE_SSL", false),
 		BatchSize:       getenvInt("BATCH_SIZE", 500),
 		BatchTimeoutSec: getenvInt("BATCH_TIMEOUT_SEC", 10),
