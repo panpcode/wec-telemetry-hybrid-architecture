@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
@@ -38,12 +39,16 @@ func main() {
 	log.Printf("  Endpoint : %s", ingestionURL)
 
 	// ── Create one simulator per car ────────────────────────────────────────
+	// One session ID for the whole run so every car's data lands in the same session.
+	sessionID := "SESSION_" + time.Now().UTC().Format("20060102_150405")
+	seed := time.Now().UnixNano()
 	cars := make([]*CarSimulator, numCars)
 	for i := range cars {
 		carID := fmt.Sprintf("CAR_%03d", i+1)
-		cfg := DefaultCarConfig(carID, track, pitEveryLaps)
-		cars[i] = NewCarSimulator(cfg)
-		log.Printf("  Created simulator for %s", carID)
+		rng := rand.New(rand.NewSource(seed + int64(i)))
+		cfg := DefaultCarConfig(carID, track, pitEveryLaps, rng)
+		cars[i] = NewCarSimulator(cfg, sessionID, rng.Int63())
+		log.Printf("  Created simulator for %s (pace %.3f, brake style %.2f)", carID, cfg.Pace, cfg.BrakeAggression)
 	}
 
 	client := &http.Client{Timeout: 5 * time.Second}

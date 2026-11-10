@@ -1,6 +1,9 @@
 package main
 
-import "time"
+import (
+	"math/rand"
+	"time"
+)
 
 // TelemetryEvent is one sensor snapshot emitted by a car at ~20 Hz.
 // Every field is present even if the car is stationary (pit stop).
@@ -124,16 +127,23 @@ type CarConfig struct {
 	FuelCapacity   float64 // liters
 	PitEveryLaps   int     // laps between pit stops (0 = no pit stops)
 	PitDurationSec float64 // how long a stop takes in real seconds
+
+	// Per-car variation so cars don't produce identical traces.
+	Pace            float64 // multiplier on the circuit's top speed (≈0.97–1.0)
+	BrakeAggression float64 // multiplier on brake pressure / heat (≈0.92–1.08)
 }
 
-// DefaultCarConfig returns sensible defaults for a WEC LMP2 / Hypercar.
-func DefaultCarConfig(carID string, track TrackConfig, pitEveryLaps int) CarConfig {
+// DefaultCarConfig returns sensible defaults for a WEC LMP2 / Hypercar,
+// with driver pace and braking style drawn from rng.
+func DefaultCarConfig(carID string, track TrackConfig, pitEveryLaps int, rng *rand.Rand) CarConfig {
 	return CarConfig{
-		CarID:          carID,
-		Track:          track,
-		MaxRPM:         9500,
-		FuelCapacity:   75.0,
-		PitEveryLaps:   pitEveryLaps,
-		PitDurationSec: 30.0,
+		CarID:           carID,
+		Track:           track,
+		MaxRPM:          9500,
+		FuelCapacity:    75.0,
+		PitEveryLaps:    pitEveryLaps,
+		PitDurationSec:  30.0,
+		Pace:            0.97 + 0.03*rng.Float64(),
+		BrakeAggression: 0.92 + 0.16*rng.Float64(),
 	}
 }

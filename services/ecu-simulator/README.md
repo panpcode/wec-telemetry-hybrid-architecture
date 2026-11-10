@@ -1,156 +1,68 @@
 # ECU Simulator
 
-Physics-based racing telemetry data generator for WEC (World Endurance Championship) on-track telemetry systems.
-
-## What It Does
-
-The ECU Simulator generates **realistic racing telemetry events** by simulating a race car's physics, sensor readings, and performance characteristics. It outputs 20 events per second (~1,200 per minute) in JSON format, designed to mimic real Electronic Control Unit (ECU) data from a competition car.
-
-## How It Works
-
-### Physics Simulation
-The simulator models realistic car behavior on a Le Mans-style 13.6 km circuit:
-
-- **Speed & Throttle**: Throttle input (0-100%) → RPM (3,000-9,500) → Speed (0-330 km/h)
-- **Braking Zones**: Automatically brakes in corners (30% of lap), accelerates on straights
-- **Tire Temperature**: Realistic thermal behavior (70°C baseline → 110°C+ under load)
-- **Fuel Consumption**: ~150-200 L/h at full throttle, based on throttle + RPM
-- **Brake Temperature**: Builds up during braking, cools at ~2% per step
-- **Lap Tracking**: Completes 13.6 km laps, tracks lap number and sector position
-
-### Data Validation
-All float values are clamped to physical ranges and validated before JSON serialization to prevent NaN/Infinity errors:
-
-- Speed: 0-396 km/h (MaxSpeed × 1.2)
-- RPM: 0-10,450 (MaxRPM × 1.1)
-- Tire Temps: 30-150°C
-- Brake Temps: 80-500°C
-- Fuel: 0-75.75L (capacity × 1.01)
-
-## Event Structure
-
-Each telemetry event includes:
-
-```json
-{
-  "event_id": "550e8400-e29b-41d4-a716-446655440000",
-  "timestamp": "2026-02-21T14:55:44Z",
-  "car_id": "CAR_001",
-  "session_id": "SESSION_20260221_145544",
-  "lap": 3,
-  "sector": 1,
-  "speed_kmh": 285.5,
-  "rpm": 8240,
-  "throttle_percent": 95.2,
-  "brake_pressure_bar": 0.50,
-  "tire_fl_temp": 108.3,
-  "tire_fr_temp": 112.1,
-  "tire_rl_temp": 106.8,
-  "tire_rr_temp": 110.2,
-  "fuel_level_liters": 52.34,
-  "fuel_flow_lph": 185.6,
-  "brake_temp": 380.5,
-  "gps_lat": 48.2712,
-  "gps_long": 11.6298,
-  "on_track": true,
-  "schema_version": "1.0"
-}
-```
-
-## Running the Simulator
-
-### Build
-
-```bash
-cd /Users/panp/PersonalCode/wec-telemetry-hybrid-architecture/services/ecu-simulator
-go build -o simulator .
-```
-
-### Run
-
-```bash
-./simulator
-```
-
-### Output Example
-
-```
-2026/02/21 14:55:44 🏎️  WEC ECU Simulator Starting...
-2026/02/21 14:55:44 ✅ Created simulator for CAR_001
-2026/02/21 14:55:44 🚀 Starting simulation loop (20.0 Hz, duration: 10m0s)
-2026/02/21 14:55:44 ❌ Failed to send event to http://localhost:8080: dial tcp 127.0.0.1:8080: connect: connection refused
-2026/02/21 14:55:45 📡 Events sent: 100 (elapsed: 1s)
-2026/02/21 14:56:00 📡 Events sent: 1200 (elapsed: 16s)
-```
+Generates physics-based telemetry for N WEC Hypercars and POSTs each sample to the ingestion service at `SIM_HZ` (default 20 Hz per car).
 
 ## Configuration
 
-Edit constants in `main.go`:
+All settings are environment variables:
 
-```go
-const (
-    SIMULATION_RATE_HZ  = 20              // Events per second
-    SIMULATION_INTERVAL = 50 * time.Millisecond
-    INGESTION_URL       = "http://localhost:8080"  // Target endpoint
-    NUM_CARS            = 2               // Number of cars to simulate
-    SIMULATION_DURATION = 10 * time.Minute
-)
+| Variable | Default | Meaning |
+|---|---|---|
+| `INGESTION_URL` | `http://localhost:8080` | Ingestion service base URL |
+| `TRACK` | `le_mans` | `le_mans`, `spa` or `imola` |
+| `NUM_CARS` | `2` | Cars to simulate (`CAR_001`, `CAR_002`, …) |
+| `SIM_HZ` | `20` | Samples per second per car |
+| `SIM_DURATION` | `10m` | How long to run before exiting |
+| `PIT_EVERY_LAPS` | `8` | Laps per stint; `0` disables pit stops |
+
+All cars in a run share one `session_id`.
+
+## Physics model
+
+- **Speed**: flat-out acceleration that tapers toward top speed; in each braking zone the driver brakes at up to ~4 g down to apex speed (40 % of top speed), then holds part throttle through the corner.
+- **RPM**: derived from speed through a 7-speed gearbox (shifts at 9,200 rpm), so the trace has the usual saw-tooth shape.
+- **Tyres**: settle at ~85–105 °C. Braking heats the fronts, traction heats the rears, and worn tyres run about 0.9 °C hotter per lap of the stint. Fresh tyres are fitted at each pit stop.
+- **Brakes**: heat input scales with brake pressure × speed, and cooling scales with airflow. Normal laps peak at ~320–380 °C.
+- **Fuel**: up to ~150 L/h flat out, which works out to ~5.6 L per Le Mans lap, or about 12 laps on the 75 L tank before the 8 L low-fuel alert.
+- **Pit stops**: 30 s stationary, refuelled at ~3 L/s, with new tyres. The first stop comes after `PIT_EVERY_LAPS` laps.
+- **Variation**: each car gets its own pace (97–100 % of top speed) and braking style, plus a small random spread from lap to lap, so the cars never produce identical traces.
+
+Reference flying-lap times from the offline test (real Hypercar pole times in brackets):
+
+| Track | Simulated | Real |
+|---|---|---|
+| Le Mans | ~3:33 | ~3:24 |
+| Spa | ~2:08 | ~2:01 |
+| Imola | ~1:35 | ~1:29 |
+
+Every value stays inside the ingestion service's validation limits. `simulator_test.go` checks this for every sample it simulates.
+
+## Running
+
+```bash
+# Whole stack (recommended)
+docker compose up --build
+
+# Standalone, against a local ingestion service
+go run .
+TRACK=spa NUM_CARS=3 PIT_EVERY_LAPS=12 go run .
 ```
-
-## What to Expect
-
-### Success Indicators
-- ✅ Events generated at **20 Hz** (one every 50ms)
-- ✅ Physics values in realistic ranges
-- ✅ Lap completes every ~20 seconds (13.6 km at 330 km/h cruise)
-- ✅ Tire temps gradually rise from 70°C to 110°C
-- ✅ Fuel depletes ~1% per lap
-
-### Without Ingestion Service
-- ⚠️ Connection refused errors (expected if no server on port 8080)
-- ✅ Simulator still generates data in memory
-- ✅ Events are validated before JSON serialization
-
-### With Ingestion Service Running
-- ✅ Events POST to `/telemetry/ingest` endpoint
-- ✅ Status 200/202 responses logged
-- ✅ Data flows through NATS JetStream → PostgreSQL → S3
 
 ## Testing
 
-Generate data and pipe to a local HTTP mock server:
-
 ```bash
-# Terminal 1: Start a simple echo server
-nc -l 8080
-
-# Terminal 2: Run simulator
-./simulator
+go test -v .
 ```
 
-Monitor raw events:
-
-```bash
-# Terminal 3: Simulation creates structured logs
-tail -f simulator.log
-```
+The tests simulate 10 laps per track offline, with no waiting on the clock. They print per-lap time, speed, fuel, tyre and brake figures, and check that:
+- lap times are realistic
+- normal laps stay under the alert thresholds
+- the first pit stop comes on the configured lap
+- cars with different seeds don't produce identical laps
 
 ## Files
 
-- **main.go** - Event loop orchestration, HTTP client
-- **simulator.go** - Physics engine, CarSimulator struct, Step() method
-- **models.go** - TelemetryEvent, CarConfig structures
-- **go.mod** - Dependencies (uuid generation)
-
-## Next Steps
-
-1. **Ingestion Service** - Receives events, validates, publishes to NATS
-2. **Stream Processor** - Computes lap metrics from event stream
-3. **Query API** - WebSocket server for real-time dashboard
-4. **Dashboard** - React UI displaying live telemetry
-
-## Dependencies
-
-- Go 1.21+
-- `github.com/google/uuid` - Event ID generation
-- Standard library only (no external dependencies beyond UUID)
+- `main.go`: configuration from env, one simulator per car, HTTP send loop
+- `simulator.go`: physics (`CarSimulator.Step`)
+- `models.go`: event schema, track definitions, per-car config
+- `simulator_test.go`: offline physics tests
