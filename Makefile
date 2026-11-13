@@ -1,282 +1,78 @@
-.PHONY: help up down logs test build clean db-shell nats-streams generate-sample load-test health check-deps
+.PHONY: help up down restart logs ps health test vet build clean-volumes reset \
+        db-shell laps alerts streams s3-ls dashboard filer
 
-# Project name
-PROJECT_NAME := wec-telemetry-hybrid-architecture
-DC := docker-compose
+DC := docker compose
+SERVICES := ecu-simulator ingestion-service cloud-uploader dashboard stream-processor
 
-help: ## Show this help message
-	@echo "$(PROJECT_NAME) - Development Commands"
-	@echo ""
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+help: ## Show this help
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
-# ==========================================
-# Docker Compose Commands
-# ==========================================
+# ── Stack ────────────────────────────────────────────────────────────────────
 
-up: ## Start all services (docker-compose up -d)
-	$(DC) up -d
-	@echo "✅ Services started. Run 'make health' to verify."
+up: ## Build and start the whole stack in the background
+	$(DC) up -d --build
 
-down: ## Stop all services
+down: ## Stop the stack (keeps data volumes)
 	$(DC) down
 
-restart: down up ## Restart all services
+restart: down up ## Restart the stack
 
-logs: ## View logs from all services (follow)
-	$(DC) logs -f
+logs: ## Follow logs from all services (make logs s=stream-processor for one)
+	$(DC) logs -f $(s)
 
-logs-ingestion: ## View ingestion service logs
-	$(DC) logs -f ingestion-service
+ps: ## Show container status
+	$(DC) ps
 
-logs-processor: ## View stream processor logs
-	$(DC) logs -f stream-processor
+health: ## Check each service endpoint
+	@curl -sf -o /dev/null http://localhost:8080/health && echo "✅ ingestion"   || echo "❌ ingestion"
+	@curl -sf -o /dev/null http://localhost:8222/healthz && echo "✅ nats"       || echo "❌ nats"
+	@curl -sf -o /dev/null http://localhost:3000        && echo "✅ dashboard"   || echo "❌ dashboard"
+	@curl -sf -o /dev/null http://localhost:9333/cluster/status 2>/dev/null || curl -sf -o /dev/null http://localhost:8888 && echo "✅ seaweedfs" || echo "❌ seaweedfs"
+	@$(DC) exec -T postgres pg_isready -U postgres -d telemetry >/dev/null 2>&1 && echo "✅ postgres" || echo "❌ postgres"
 
-logs-sink: ## View raw event sink logs
-	$(DC) logs -f raw-event-sink
+clean-volumes: ## Stop the stack and DELETE all data volumes
+	$(DC) down -v
 
-logs-api: ## View query API logs
-	$(DC) logs -f query-api
+reset: clean-volumes up ## Wipe data and start fresh
 
-logs-simulator: ## View ECU simulator logs
-	$(DC) logs -f ecu-simulator
+# ── Go ───────────────────────────────────────────────────────────────────────
 
-# ==========================================
-# Health & Status
-# ==========================================
+test: ## Run Go tests for every service
+	@for s in $(SERVICES); do (cd services/$$s && go test ./...) || exit 1; done
 
-health: ## Check all services health
-	@echo "📊 Service Health Check"
-	@echo "========================"
-	@echo ""
-	@echo "Checking Ingestion Service..."
-	@curl -s -o /dev/null -w "HTTP %{http_code}\n" http://localhost:8080/health || echo "❌ Ingestion offline"
-	@echo ""
-	@echo "Checking Query API..."
-	@curl -s -o /dev/null -w "HTTP %{http_code}\n" http://localhost:8081/health || echo "❌ Query API offline"
-	@echo ""
-	@echo "Checking NATS..."
-	@curl -s -o /dev/null -w "HTTP %{http_code}\n" http://localhost:8222 || echo "❌ NATS offline"
-	@echo ""
-	@echo "Checking PostgreSQL..."
-	@$(DC) exec -T postgres pg_isready -U postgres > /dev/null && echo "✅ PostgreSQL ready" || echo "❌ PostgreSQL not ready"
-	@echo ""
-	@docker-compose ps
-
-# ==========================================
-# Database Commands
-# ==========================================
-
-db-shell: ## Open PostgreSQL shell
-	$(DC) exec postgres psql -U postgres -d telemetry
-
-db-init: ## Initialize database schema
-	@echo "🔧 Initializing database..."
-	$(DC) exec -T postgres psql -U postgres -d telemetry < infrastructure/postgres/schema.sql
-	@echo "✅ Database initialized"
-
-db-backup: ## Backup database to file
-	$(DC) exec -T postgres pg_dump -U postgres telemetry > backup_$(shell date +%Y%m%d_%H%M%S).sql
-	@echo "✅ Backup created"
-
-# ==========================================
-# NATS JetStream Commands
-# ==========================================
-
-nats-streams: ## List all NATS streams
-	@echo "📡 NATS Streams"
-	@$(DC) exec -T nats nats stream list || echo "❌ NATS not accessible"
-
-nats-consumers: ## List all consumers
-	@echo "📡 NATS Consumers"
-	@$(DC) exec -T nats nats consumer list telemetry-raw || echo "❌ NATS not accessible"
-
-nats-watch: ## Watch telemetry events in real-time
-	$(DC) exec nats nats sub 'telemetry.>'
-
-nats-info: ## Show stream info
-	$(DC) exec nats nats stream info telemetry-raw
-
-# ==========================================
-# Data Generation & Testing
-# ==========================================
-
-generate-sample: ## Generate sample telemetry data (1 car, 10 laps)
-	@echo "🚗 Generating sample data (1 car, 10 laps)..."
-	$(DC) exec ecu-simulator python generate_sample.py
-	@echo "✅ Sample data generated"
-
-load-test: ## Run load test (4 cars, 100 Hz)
-	@echo "🏋️ Running load test (4 cars, 100 Hz for 60 sec)..."
-	$(DC) exec ecu-simulator python load_test.py --cars 4 --frequency 100 --duration 60
-	@echo "✅ Load test complete"
-
-stress-test: ## Intensive stress test (10 cars, 200 Hz, 5 min)
-	@echo "⚡ Running stress test (10 cars, 200 Hz for 300 sec)..."
-	$(DC) exec ecu-simulator python load_test.py --cars 10 --frequency 200 --duration 300
-	@echo "✅ Stress test complete"
-
-# ==========================================
-# API Testing
-# ==========================================
-
-test-ingestion: ## Test ingestion endpoint
-	@echo "🧪 Testing ingestion endpoint..."
-	curl -X POST http://localhost:8080/telemetry/ingest \
-		-H "Content-Type: application/json" \
-		-d '{"car_id": "TEST_001", "speed_kmh": 250, "rpm": 7000}' \
-		-w "\nStatus: %{http_code}\n"
-
-test-api-live: ## Test live telemetry API
-	@echo "🧪 Testing live telemetry API..."
-	curl -s http://localhost:8081/api/v1/live/telemetry?car_id=CAR_001&limit=10 | python -m json.tool
-
-test-api-analytics: ## Test analytics API
-	@echo "🧪 Testing analytics API..."
-	curl -s http://localhost:8081/api/v1/analytics/fuel?car_id=CAR_001 | python -m json.tool
-
-# ==========================================
-# Building & Compilation
-# ==========================================
+vet: ## Run go vet for every service
+	@for s in $(SERVICES); do (cd services/$$s && go vet ./...) || exit 1; done
 
 build: ## Build all Docker images
-	$(DC) build --no-cache
+	$(DC) build
 
-build-simulator: ## Build ECU simulator image
-	$(DC) build ecu-simulator
+# ── Data ─────────────────────────────────────────────────────────────────────
 
-build-ingestion: ## Build ingestion service image
-	$(DC) build ingestion-service
+db-shell: ## Open a psql shell on the telemetry database
+	$(DC) exec postgres psql -U postgres -d telemetry
 
-build-processor: ## Build stream processor image
-	$(DC) build stream-processor
+laps: ## Show the latest 20 completed laps
+	@$(DC) exec -T postgres psql -U postgres -d telemetry -c \
+	  "SELECT car_id, lap, round(lap_time_s::numeric,1) AS lap_s, round(fuel_used_l::numeric,2) AS fuel_l, \
+	          round(avg_speed_kmh::numeric) AS avg_kmh, round(max_tire_c::numeric) AS max_tire, \
+	          round(max_brake_c::numeric) AS max_brake, pitted \
+	   FROM lap_metrics ORDER BY ended_at DESC LIMIT 20"
 
-build-sink: ## Build event sink image
-	$(DC) build raw-event-sink
+alerts: ## Show the latest 20 alerts
+	@$(DC) exec -T postgres psql -U postgres -d telemetry -c \
+	  "SELECT raised_at, car_id, lap, kind, detail FROM alerts ORDER BY raised_at DESC LIMIT 20"
 
-build-api: ## Build query API image
-	$(DC) build query-api
+streams: ## Show JetStream stream and consumer state
+	@curl -s 'http://localhost:8222/jsz?streams=true&consumers=true' | python3 -m json.tool
 
-# ==========================================
-# Code Quality
-# ==========================================
+s3-ls: ## List archived telemetry files in the bucket
+	@curl -s 'http://localhost:8888/buckets/wec-telemetry/?pretty=y' -H 'Accept: application/json' | python3 -c \
+	  'import json,sys; [print(e["FullPath"]) for e in (json.load(sys.stdin).get("Entries") or [])]'
 
-lint: ## Run linters on all Python services
-	@echo "🔍 Running linters..."
-	@for dir in services/*/; do \
-		echo "Linting $$dir..."; \
-		$(DC) run --rm $$(basename $$dir) pylint .; \
-	done
+dashboard: ## Open the pit-wall dashboard
+	open http://localhost:3000
 
-format: ## Format all Python code
-	@echo "🎨 Formatting code..."
-	@for dir in services/*/; do \
-		$(DC) run --rm $$(basename $$dir) black .; \
-	done
+filer: ## Open the SeaweedFS file browser (archived telemetry)
+	open http://localhost:8888/buckets/wec-telemetry/
 
-test: ## Run test suite
-	@echo "🧪 Running tests..."
-	$(DC) run --rm -T pytest /app/tests -v
-
-coverage: ## Generate test coverage report
-	@echo "📊 Generating coverage report..."
-	$(DC) run --rm -T pytest /app/tests --cov=app --cov-report=html
-	@echo "Coverage report: htmlcov/index.html"
-
-# ==========================================
-# Storage & Persistence
-# ==========================================
-
-minio-console: ## Open MinIO web console
-	@echo "Opening MinIO console at http://localhost:9001"
-	@echo "Username: minioadmin"
-	@echo "Password: minioadmin"
-	open http://localhost:9001
-
-minio-ls: ## List MinIO buckets and objects
-	$(DC) exec minio mc ls minio
-
-minio-info: ## Show MinIO info
-	$(DC) exec minio mc du minio
-
-# ==========================================
-# Cleaning & Reset
-# ==========================================
-
-clean: ## Remove stopped containers, dangling images
-	@echo "🧹 Cleaning up..."
-	docker system prune -f
-
-clean-volumes: ## Remove all volumes (data loss!)
-	@echo "⚠️  Removing all volumes (this deletes data)..."
-	$(DC) down -v
-	@echo "✅ Volumes removed"
-
-clean-all: clean-volumes build ## Full reset (builds fresh images, deletes data)
-	@echo "✅ Full reset complete"
-
-reset: clean-volumes up ## Reset to clean state and restart
-
-# ==========================================
-# Utilities
-# ==========================================
-
-check-deps: ## Check required dependencies
-	@echo "🔍 Checking dependencies..."
-	@command -v docker >/dev/null 2>&1 && echo "✅ Docker installed" || echo "❌ Docker not found"
-	@command -v docker-compose >/dev/null 2>&1 && echo "✅ Docker Compose installed" || echo "❌ Docker Compose not found"
-	@command -v git >/dev/null 2>&1 && echo "✅ Git installed" || echo "❌ Git not found"
-	@command -v curl >/dev/null 2>&1 && echo "✅ curl installed" || echo "❌ curl not found"
-
-version: ## Show versions of key components
-	@echo "🔍 Component Versions"
-	@echo "===================="
-	@docker --version
-	@docker-compose --version
-
-# ==========================================
-# Development Workflows
-# ==========================================
-
-dev-setup: check-deps build up health ## Full development setup
-	@echo "✅ Development environment ready!"
-
-fresh-start: clean-volumes build up generate-sample health ## Fresh start with sample data
-	@echo "✅ Fresh start complete! Run 'make health' to verify."
-
-demo: fresh-start ## Run full demo (setup + sample data)
-	@echo ""
-	@echo "🏁 Demo Ready!"
-	@echo "Try these commands:"
-	@echo "  make test-api-live"
-	@echo "  make nats-watch"
-	@echo "  make db-shell"
-
-# ==========================================
-# Documentation
-# ==========================================
-
-docs: ## Open architecture documentation
-	@echo "📚 Opening Architecture.md..."
-	open architecture/Architecture.md || less architecture/Architecture.md
-
-api-docs: ## Show API documentation
-	@echo "📚 API Documentation"
-	@echo "===================="
-	@cat dashboards/postman/README.md 2>/dev/null || echo "API docs coming soon"
-
-# ==========================================
-# Monitoring & Metrics
-# ==========================================
-
-metrics: ## Show all service metrics
-	@echo "📊 Ingestion Metrics"
-	@curl -s http://localhost:8080/metrics | grep -i ingestion || echo "No metrics available yet"
-	@echo ""
-	@echo "📊 Processor Metrics"
-	@curl -s http://localhost:8080/metrics | grep -i processor || echo "No metrics available yet"
-
-watch-metrics: ## Watch metrics in real-time
-	@watch -n 1 'curl -s http://localhost:8080/metrics | grep -E ":\s[0-9]+"'
-
-# Default target
 .DEFAULT_GOAL := help
