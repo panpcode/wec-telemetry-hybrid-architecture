@@ -108,3 +108,21 @@ func TestCarsDiffer(t *testing.T) {
 		t.Error("two cars with different seeds produced identical laps")
 	}
 }
+
+func TestNewLapStartsInSectorZero(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+	cs := NewCarSimulator(DefaultCarConfig("CAR_T", TrackByName("imola"), 0, rng), "S", 1)
+	prevLap := 0
+	for i := 0; i < 20*60*5; i++ { // 5 simulated minutes
+		e := cs.Step(0.05)
+		if e.Lap != prevLap {
+			if e.Sector != 0 {
+				t.Fatalf("first sample of lap %d has sector %d, want 0", e.Lap, e.Sector)
+			}
+			prevLap = e.Lap
+		}
+	}
+	if prevLap < 2 {
+		t.Fatal("expected at least two line crossings")
+	}
+}

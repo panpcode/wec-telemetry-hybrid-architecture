@@ -241,7 +241,9 @@ func (cs *CarSimulator) Step(dt float64) TelemetryEvent {
 	cool := (cs.brakeTemp - ambientBrakeC) * (0.04 + 0.22*speedFrac)
 	cs.brakeTemp = clamp(cs.brakeTemp+(heat-cool)*dt, 80, 590)
 
-	sector := int(lapProgress * float64(track.Sectors))
+	// Use the position *after* this step's movement: on the step that crosses
+	// the line, lapProgress still reflects the end of the previous lap.
+	sector := int(cs.lapDistance / track.LengthKm * float64(track.Sectors))
 	if sector >= track.Sectors {
 		sector = track.Sectors - 1
 	}
