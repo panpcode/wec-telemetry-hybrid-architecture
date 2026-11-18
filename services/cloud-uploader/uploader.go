@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -160,11 +159,11 @@ func (u *Uploader) collectBatch(window time.Duration) []*nats.Msg {
 	return batch
 }
 
-// uploadBatch groups messages by (session_id, car_id), compresses each group
-// as gzipped NDJSON, and uploads to S3 using Hive-style path partitioning
+// uploadBatch groups messages by (session_id, car_id), writes each group
+// as a Parquet file, and uploads to S3 using Hive-style path partitioning
 // so Athena can use partition projection directly.
 //
-// Path format: session_id={X}/car_id={Y}/{timestamp}_{firstSeq}.jsonl.gz
+// Path format: session_id={X}/car_id={Y}/{timestamp}_{firstSeq}.parquet
 // For real AWS S3, point S3_ENDPOINT at https://s3.<region>.amazonaws.com
 // with S3_USE_SSL=true — minio-go is a generic S3 client, no code change needed.
 func (u *Uploader) uploadBatch(msgs []*nats.Msg) error {
@@ -201,12 +200,18 @@ func (u *Uploader) uploadBatch(msgs []*nats.Msg) error {
 	}
 
 	for _, g := range groups {
-		buf, err := compressNDJSON(g.payloads)
+		buf, rows, skipped, err := encodeParquet(g.payloads)
 		if err != nil {
-			return fmt.Errorf("compress %s/%s: %w", g.sessionID, g.carID, err)
+			return fmt.Errorf("encode parquet %s/%s: %w", g.sessionID, g.carID, err)
+		}
+		if skipped > 0 {
+			log.Printf("  skipped %d undecodable events for %s/%s", skipped, g.sessionID, g.carID)
+		}
+		if rows == 0 {
+			continue
 		}
 
-		objectKey := fmt.Sprintf("session_id=%s/car_id=%s/%s_%d.jsonl.gz",
+		objectKey := fmt.Sprintf("session_id=%s/car_id=%s/%s_%d.parquet",
 			g.sessionID, g.carID, ts, firstSeq)
 
 		_, err = u.s3.PutObject(
@@ -215,35 +220,15 @@ func (u *Uploader) uploadBatch(msgs []*nats.Msg) error {
 			objectKey,
 			bytes.NewReader(buf),
 			int64(len(buf)),
-			minio.PutObjectOptions{
-				ContentType:     "application/gzip",
-				ContentEncoding: "gzip",
-			},
+			minio.PutObjectOptions{ContentType: "application/vnd.apache.parquet"},
 		)
 		if err != nil {
 			return fmt.Errorf("PutObject %s: %w", objectKey, err)
 		}
-		log.Printf("  s3://%s/%s  (%d events, %d bytes compressed)",
-			u.cfg.S3Bucket, objectKey, len(g.payloads), len(buf))
+		log.Printf("  s3://%s/%s  (%d rows, %d bytes)",
+			u.cfg.S3Bucket, objectKey, rows, len(buf))
 	}
 	return nil
-}
-
-// compressNDJSON writes each payload on its own line and gzip-compresses the result.
-// NDJSON (newline-delimited JSON) is readable by Athena, pandas, and spark with no ETL.
-func compressNDJSON(payloads []json.RawMessage) ([]byte, error) {
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	for _, p := range payloads {
-		if _, err := gz.Write(p); err != nil {
-			return nil, err
-		}
-		gz.Write([]byte("\n")) //nolint:errcheck
-	}
-	if err := gz.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
 }
 
 // ensureStream creates the TELEMETRY JetStream stream if it doesn't exist.
