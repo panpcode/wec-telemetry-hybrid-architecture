@@ -147,6 +147,17 @@ services:
         condition: service_healthy
     restart: on-failure
 
+  # ── DuckDB (ad-hoc SQL over the S3 archive) ──────────────────────────────────
+  # Not started by `up`; run it with `make query` or `make query-examples`.
+  duckdb:
+    build: ./analytics
+    profiles: ["tools"]
+    volumes:
+      - ./analytics:/analytics:ro
+    depends_on:
+      - seaweedfs
+      - postgres
+
 volumes:
   nats-data:
   seaweedfs-data:

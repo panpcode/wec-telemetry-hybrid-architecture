@@ -1,5 +1,5 @@
 .PHONY: help up down restart logs ps health test vet build clean-volumes reset \
-        db-shell laps alerts streams s3-ls dashboard filer
+        db-shell laps alerts streams s3-ls dashboard filer query query-examples
 
 DC := docker compose
 SERVICES := ecu-simulator ingestion-service cloud-uploader dashboard stream-processor
@@ -68,6 +68,15 @@ streams: ## Show JetStream stream and consumer state
 s3-ls: ## List archived telemetry files in the bucket
 	@curl -s 'http://localhost:8888/buckets/wec-telemetry/?pretty=y' -H 'Accept: application/json' | python3 -c \
 	  'import json,sys; [print(e["FullPath"]) for e in (json.load(sys.stdin).get("Entries") or [])]'
+
+query: ## Interactive DuckDB shell over the S3 archive (view: telemetry, Postgres: pg)
+	$(DC) run --rm --no-deps duckdb
+
+query-examples: ## Run every query in analytics/queries against the archive
+	@for f in analytics/queries/*.sql; do \
+	  printf "\n── %s\n" "$$f"; \
+	  $(DC) run --rm --no-deps -T duckdb -c ".read /$$f" || exit 1; \
+	done
 
 dashboard: ## Open the pit-wall dashboard
 	open http://localhost:3000
