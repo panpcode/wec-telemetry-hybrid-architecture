@@ -1,5 +1,7 @@
 # WEC Telemetry Pipeline
 
+![Pit-wall dashboard showing two cars live](docs/images/dashboard.png)
+
 A side project that simulates telemetry from endurance race cars (WEC / Le Mans style). It runs the data through a pipeline that a team could use on a race weekend:
 
 - **On the pit wall:** race engineers see each car live.
@@ -7,8 +9,6 @@ A side project that simulates telemetry from endurance race cars (WEC / Le Mans 
 - **After the race:** analysts can run SQL over every raw sample.
 
 Everything runs on one machine with Docker Compose. The car data comes from a simulator, not a real car.
-
-![Pit-wall dashboard showing two cars live](docs/images/dashboard.png)
 
 ## Why it is built this way
 
