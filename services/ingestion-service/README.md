@@ -1,164 +1,60 @@
 # Ingestion Service
 
-Receives telemetry events from ECU simulators, validates them, and publishes to NATS JetStream for downstream processing.
-
-## What It Does
-
-```
-ECU Simulator (20 Hz events)
-    ↓ HTTP POST /telemetry/ingest
-Ingestion Service (port 8080)
-    ↓ Validate structure + ranges
-    ↓
-NATS JetStream
-    ↓ Stream: TELEMETRY.{CAR_ID}
-Stream Processor (computes metrics)
-```
+HTTP entry point for telemetry. Each event is checked against basic range limits and then published to NATS JetStream on `TELEMETRY.<car_id>`.
 
 ## Endpoints
 
-### POST /telemetry/ingest
-Receives and validates telemetry events.
+`POST /telemetry/ingest` takes one event as JSON (see the main README for the full schema).
 
-**Request:**
-```json
-{
-  "event_id": "550e8400-e29b-41d4-a716-446655440000",
-  "car_id": "CAR_001",
-  "timestamp": "2026-02-21T15:22:46Z",
-  "lap": 3,
-  "speed_kmh": 285.5,
-  "rpm": 8240,
-  ...
-}
-```
+| Status | Meaning |
+|---|---|
+| `202` | Valid event, published to NATS |
+| `400` | Invalid JSON, or a value outside the limits below |
+| `500` | NATS publish failed |
 
-**Responses:**
-- `202 Accepted` - Event valid, published to NATS
-- `400 Bad Request` - Validation failed (invalid JSON or invalid ranges)
-- `500 Internal Server Error` - NATS publish failed
+`GET /health` returns `status`, `nats_connected` and `events_ingested`.
 
-### GET /health
-Returns service health and stats.
+## Validation limits
 
-**Response:**
-```json
-{
-  "status": "healthy",
-  "nats_connected": true,
-  "events_ingested": 1200,
-  "timestamp": "2026-02-21T15:25:00Z"
-}
-```
+| Field | Range |
+|---|---|
+| `speed_kmh` | 0–400 |
+| `rpm` | 0–10,000 |
+| `throttle_percent` | 0–100 |
+| `brake_pressure_bar` | 0–25 |
+| `tire_*_temp` | 0–200 °C |
+| `brake_temp` | 0–600 °C |
+| `fuel_level_liters` | 0–100 |
+| `fuel_flow_lph` | 0–250 |
 
-## Validation Rules
+NaN and infinite values are rejected.
 
-| Field | Min | Max | Notes |
-|-------|-----|-----|-------|
-| speed_kmh | 0 | 400 | km/h |
-| rpm | 0 | 10,000 | revolutions/min |
-| throttle_percent | 0 | 100 | % |
-| brake_pressure_bar | 0 | 25 | bar |
-| tire_*_temp | 0 | 200 | °C |
-| brake_temp | 0 | 600 | °C |
-| fuel_level_liters | 0 | 100 | liters |
-| fuel_flow_lph | 0 | 250 | L/h |
+## Stream
 
-All fields are checked for NaN/Infinity values.
+On startup the service creates the `TELEMETRY` stream if it doesn't already exist. The stream uses file storage and keeps 7 days of data, capped at 10 GB. The stream processor and the cloud uploader create it the same way, so start-up order doesn't matter.
 
-## Building
+## Configuration
+
+| Env var | Flag | Default |
+|---|---|---|
+| `HTTP_ADDR` | `-http` | `:8080` |
+| `NATS_URL` | `-nats` | `nats://localhost:4222` |
+
+If both are set, the flag wins.
+
+## Try it
 
 ```bash
-cd /Users/panp/PersonalCode/wec-telemetry-hybrid-architecture/services/ingestion-service
-go build -o ingestion-service .
+go run .                                   # needs NATS on localhost:4222
+curl localhost:8080/health
+
+curl -X POST localhost:8080/telemetry/ingest -H 'Content-Type: application/json' -d '{
+  "event_id": "test-001", "timestamp": "2026-06-14T15:00:00Z",
+  "car_id": "CAR_001", "session_id": "TEST", "lap": 1, "sector": 0,
+  "speed_kmh": 200, "rpm": 7000, "throttle_percent": 80, "brake_pressure_bar": 0,
+  "tire_fl_temp": 95, "tire_fr_temp": 97, "tire_rl_temp": 92, "tire_rr_temp": 94,
+  "fuel_level_liters": 70, "fuel_flow_lph": 120, "brake_temp": 250,
+  "gps_lat": 47.95, "gps_long": 0.21, "on_track": true, "in_pit": false,
+  "schema_version": "1.0"
+}'
 ```
-
-## Running
-
-### Prerequisites
-- NATS JetStream running on localhost:4222 (or set `-nats` flag)
-
-### Start the service
-
-```bash
-./ingestion-service
-```
-
-### With custom addresses
-
-```bash
-./ingestion-service -http :9000 -nats nats://nats-server:4222
-```
-
-### Output
-```
-🏎️  WEC Ingestion Service Starting...
-✅ Connected to NATS at nats://localhost:4222
-🚀 Ingestion Service listening on :8080
-```
-
-## Testing
-
-### Health check
-```bash
-curl http://localhost:8080/health | jq
-```
-
-### Send test event
-```bash
-curl -X POST http://localhost:8080/telemetry/ingest \
-  -H "Content-Type: application/json" \
-  -d '{
-    "event_id": "test-001",
-    "car_id": "CAR_001",
-    "session_id": "SESSION_20260221",
-    "lap": 1,
-    "sector": 0,
-    "speed_kmh": 200,
-    "rpm": 5000,
-    "throttle_percent": 75,
-    "brake_pressure_bar": 0,
-    "tire_fl_temp": 95,
-    "tire_fr_temp": 98,
-    "tire_rl_temp": 92,
-    "tire_rr_temp": 94,
-    "fuel_level_liters": 70,
-    "fuel_flow_lph": 150,
-    "brake_temp": 200,
-    "gps_lat": 48.27,
-    "gps_long": 11.63,
-    "on_track": true,
-    "schema_version": "1.0"
-  }' | jq
-```
-
-## NATS JetStream Streams
-
-Events are published to streams named `TELEMETRY.{CAR_ID}`:
-
-- `TELEMETRY.CAR_001` - Events from CAR_001
-- `TELEMETRY.CAR_002` - Events from CAR_002
-- etc.
-
-Subscribers can listen to:
-- Individual car: `TELEMETRY.CAR_001`
-- All cars: `TELEMETRY.>` (wildcard)
-
-## Architecture Integration
-
-In the full system:
-
-1. **ECU Simulator** - Generates raw telemetry (20 Hz × N cars)
-2. **Ingestion Service** (this) - Validates + routes to NATS
-3. **Stream Processor** - Computes lap metrics (<100ms latency)
-4. **PostgreSQL** - Stores computed metrics only
-5. **NATS JetStream** - 48-hour offline buffer
-6. **Query API** - WebSocket for real-time dashboard
-7. **React Dashboard** - Race engineer UI
-
-## Performance
-
-- Throughput: ~1,200 events/min per car
-- Latency: <10ms ingest + validate + publish
-- Memory: ~50MB baseline + buffer
-- Connections: 1 persistent NATS connection
