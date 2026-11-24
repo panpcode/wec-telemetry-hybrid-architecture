@@ -182,7 +182,7 @@
     }
     .bar-fill.thr { background: var(--green); }
     .bar-fill.brk { background: var(--red); }
-    .bar-val { font-size: 10px; color: var(--dim); width: 36px; text-align: right; }
+    .bar-val { font-size: 10px; color: var(--dim); width: 56px; text-align: right; white-space: nowrap; }
 
     /* section labels + divider */
     .divider { border: none; border-top: 1px solid var(--border); margin: 9px 0; }
@@ -346,7 +346,9 @@
         </div>
         <div class="updated" id="${cid}-ts">—</div>
       `;
-      $('grid').appendChild(card);
+      // Keep cards sorted by car ID regardless of which car reports first.
+      const next = [...$('grid').querySelectorAll('.card')].find(c => c.id > card.id);
+      $('grid').insertBefore(card, next || null);
     }
 
     // ── Update all values ──────────────────────────────────────────────────
