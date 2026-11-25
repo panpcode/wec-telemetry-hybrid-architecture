@@ -180,3 +180,11 @@ docs/images/          screenshots
 docker-compose.yml
 Makefile
 ```
+
+## About
+
+I'm Panos, a software engineer who loves motorsport, and this project is where the two meet. The idea came from a few calls with a WEC team last year, where I started to see how much a race weekend depends on data, both live and afterwards.
+
+With two small kids, I don't have much free time these days. AI tools have made it possible to build something like this quickly in the time I do have. I really enjoy working on apps like this, playing with them and improving them bit by bit.
+
+If you'd like to add something, whether you write code or not, feel free to open an issue or a pull request for anything you want. Cheers!
